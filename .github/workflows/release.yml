@@ -56,10 +56,18 @@ jobs:
           unzip -p "packages/Pz.Connector.CosmosDb.${VERSION}.nupkg" pz.connector.json | tee manifest.json
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "cosmosdb"' manifest.json
-          grep -q '"Merge"' manifest.json
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge; do
+            grep -q "\"${cap}\"" manifest.json
+          done
           for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
             grep -q "\"${rid}\":" manifest.json
           done
+          # The gallery icon and README ride inside the package; a lost <None Pack="true"> item
+          # would only show up on nuget.org, after a version can no longer be replaced.
+          PKG="packages/Pz.Connector.CosmosDb.${VERSION}.nupkg"
+          unzip -l "${PKG}" | grep -q ' icon.png$'
+          unzip -l "${PKG}" | grep -q ' README.md$'
+          unzip -p "${PKG}" Pz.Connector.CosmosDb.nuspec | grep -q '<icon>icon.png</icon>'
       - name: NuGet login (trusted publishing)
         id: login
         uses: NuGet/login@v1
