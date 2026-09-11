@@ -114,6 +114,33 @@ internal sealed record CosmosOutputConfig(string Container, IReadOnlyList<string
 
         ColumnPlan.ValidateNames(schema.FieldsList.Select(f => f.Name).ToList(), prefix, errors);
 
+        // Nested columns of one parent must be adjacent: the writer streams objects in column
+        // order and JSON forbids a repeated key. Every proper prefix of a dotted name is a parent;
+        // a parent seen, left, and seen again is the refusal.
+        var lastParents = new HashSet<string>(StringComparer.Ordinal);
+        var closedParents = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in schema.FieldsList.Select(f => f.Name))
+        {
+            var parents = new HashSet<string>(StringComparer.Ordinal);
+            for (var dot = name.IndexOf('.'); dot > 0; dot = name.IndexOf('.', dot + 1))
+            {
+                parents.Add(name[..dot]);
+            }
+
+            foreach (var left in lastParents.Where(p => !parents.Contains(p)))
+            {
+                closedParents.Add(left);
+            }
+
+            var reopened = parents.FirstOrDefault(closedParents.Contains);
+            if (reopened is not null)
+            {
+                errors.Add($"{prefix}: nested columns of '{reopened}' are not adjacent ('{name}' comes after another parent); keep the columns of one nested object together in the pipeline's SELECT list");
+            }
+
+            lastParents = parents;
+        }
+
         var pkColumns = new List<string>();
         foreach (var path in partitionKeyPaths)
         {

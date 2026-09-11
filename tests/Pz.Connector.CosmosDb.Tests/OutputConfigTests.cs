@@ -98,4 +98,12 @@ public sealed class OutputConfigTests
         Assert.Contains(errors, e => e.Contains("id_from entry 'x' is not a column", StringComparison.Ordinal));
         Assert.Contains(errors, e => e.Contains("id_from entry 'd' is a Double column", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void Nested_columns_must_be_adjacent()
+    {
+        var errors = Validate(Spec("append"), Schema(("id", StringType.Default), ("a.x", StringType.Default), ("b", StringType.Default), ("a.y", StringType.Default)));
+        Assert.Contains(errors, e => e.Contains("nested columns of 'a' are not adjacent", StringComparison.Ordinal));
+        Assert.Empty(Validate(Spec("append"), Schema(("id", StringType.Default), ("a.x", StringType.Default), ("a.y", StringType.Default), ("b", StringType.Default))));
+    }
 }
