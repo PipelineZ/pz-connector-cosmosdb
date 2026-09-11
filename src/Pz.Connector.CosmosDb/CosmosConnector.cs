@@ -9,7 +9,7 @@ namespace Pz.Connector.CosmosDb;
 /// <summary>Azure Cosmos DB (NoSQL API) for pz: a container is a table-shaped dataset typed from a
 /// declared or sampled schema and read one feed range per partition; a sink output creates or
 /// upserts each row as one document under the container's own (partition key, id) identity.</summary>
-public sealed class CosmosConnector : IConnector, ISourceConnector
+public sealed class CosmosConnector : IConnector, ISourceConnector, ISinkConnector
 {
     private readonly ILoggerFactory _loggerFactory;
 
@@ -114,6 +114,14 @@ public sealed class CosmosConnector : IConnector, ISourceConnector
     {
         var connection = ParseOrThrow(config);
         return ValueTask.FromResult<ISource>(new CosmosSource(connection, CosmosClientFactory.Create(connection), _loggerFactory.CreateLogger<CosmosSource>()));
+    }
+
+    ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var connection = ParseOrThrow(config);
+        return ValueTask.FromResult<ISink>(new CosmosSink(connection,
+            output => CosmosClientFactory.Create(connection, bulk: true, rateLimitRetries: output.RateLimitRetries),
+            _loggerFactory.CreateLogger<CosmosSink>()));
     }
 
     internal static CosmosConnectionConfig ParseOrThrow(ConnectorConfig config)

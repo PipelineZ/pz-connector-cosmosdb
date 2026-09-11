@@ -182,4 +182,124 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         Assert.False(ex.IsTransient);
         Assert.Contains("(400", ex.Message);
     }
+
+    private static async Task<WriteResult> WriteAsync(CosmosFixture cosmos, OutputSpec spec, Apache.Arrow.Schema schema, params Apache.Arrow.RecordBatch[] batches)
+    {
+        ISinkConnector connector = new CosmosConnector();
+        await using var sink = await connector.OpenAsync(new ConnectorConfig(cosmos.ConnectionConfig()), CancellationToken.None);
+        await using var session = await sink.BeginWriteAsync(spec, schema, CancellationToken.None);
+        foreach (var batch in batches)
+        {
+            await session.WriteBatchAsync(batch, CancellationToken.None);
+        }
+
+        return await session.CommitAsync(CancellationToken.None);
+    }
+
+    private static Apache.Arrow.RecordBatch Rows(params (string Id, string Region, long N)[] rows)
+    {
+        var ids = new Apache.Arrow.StringArray.Builder();
+        var regions = new Apache.Arrow.StringArray.Builder();
+        var ns = new Apache.Arrow.Int64Array.Builder();
+        foreach (var (id, region, n) in rows)
+        {
+            ids.Append(id); regions.Append(region); ns.Append(n);
+        }
+
+        var schema = new Apache.Arrow.Schema(
+        [
+            new Apache.Arrow.Field("id", Apache.Arrow.Types.StringType.Default, false),
+            new Apache.Arrow.Field("region", Apache.Arrow.Types.StringType.Default, false),
+            new Apache.Arrow.Field("n", Apache.Arrow.Types.Int64Type.Default, true),
+        ], null);
+        return new Apache.Arrow.RecordBatch(schema, [ids.Build(), regions.Build(), ns.Build()], rows.Length);
+    }
+
+    [SkippableFact]
+    public async Task Merge_upserts_on_partition_key_and_id()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = CosmosFixture.NewName("merge_pk");
+        await cosmos.CreateContainerAsync(name, "/region");
+        var spec = new OutputSpec("cosmosdb", name, "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id"] };
+        using var first = Rows(("a", "eu", 1), ("b", "eu", 2));
+        await WriteAsync(cosmos, spec, first.Schema, first);
+        using var second = Rows(("a", "eu", 10), ("c", "us", 3));
+        var result = await WriteAsync(cosmos, spec, second.Schema, second);
+        Assert.Equal(2, result.RowsWritten);
+        var docs = await cosmos.AllAsync(name);
+        Assert.Equal(3, docs.Count);
+        Assert.Equal(10, docs.Single(d => d.GetProperty("id").GetString() == "a").GetProperty("n").GetInt64());
+    }
+
+    [SkippableFact]
+    public async Task Append_conflict_on_an_explicit_id_is_fatal()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = CosmosFixture.NewName("conflict");
+        await cosmos.CreateContainerAsync(name, "/region");
+        var spec = new OutputSpec("cosmosdb", name, "append", "fail_on_change", new Dictionary<string, object?>());
+        using var batch = Rows(("a", "eu", 1));
+        await WriteAsync(cosmos, spec, batch.Schema, batch);
+        using var again = Rows(("a", "eu", 1));
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => WriteAsync(cosmos, spec, again.Schema, again));
+        Assert.False(ex.IsTransient);
+        Assert.Contains("(409", ex.Message);
+        Assert.Contains("'a'", ex.Message);
+    }
+
+    [SkippableFact]
+    public async Task Missing_container_and_partition_key_mismatch_are_refused_up_front()
+    {
+        DockerFacts.SkipUnlessDocker();
+        using var batch = Rows(("a", "eu", 1));
+        var missing = new OutputSpec("cosmosdb", "no_such_out", "append", "fail_on_change", new Dictionary<string, object?>());
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => WriteAsync(cosmos, missing, batch.Schema, batch));
+        Assert.Contains("PZCS0302", ex.Message);
+
+        var name = CosmosFixture.NewName("pkmismatch");
+        await cosmos.CreateContainerAsync(name, "/tenant");
+        var mismatch = new OutputSpec("cosmosdb", name, "append", "fail_on_change", new Dictionary<string, object?>());
+        var pk = await Assert.ThrowsAsync<PzConnectorException>(() => WriteAsync(cosmos, mismatch, batch.Schema, batch));
+        Assert.Contains("PZCS0303", pk.Message);
+        Assert.Contains("'/tenant'", pk.Message);
+    }
+
+    [SkippableFact]
+    public async Task Replace_is_refused_before_touching_the_container()
+    {
+        DockerFacts.SkipUnlessDocker();
+        using var batch = Rows(("a", "eu", 1));
+        var spec = new OutputSpec("cosmosdb", "never_created", "replace", "fail_on_change", new Dictionary<string, object?>());
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => WriteAsync(cosmos, spec, batch.Schema, batch));
+        Assert.Contains("PZCS0301", ex.Message);
+        Assert.False(await cosmos.ExistsAsync("never_created"));
+    }
+
+    [SkippableFact]
+    public async Task Round_trip_through_source_and_sink_keeps_values()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var source = await cosmos.SeedAsync(["""{"id":"r1","region":"eu","n":5,"address":{"city":"Oslo"},"tags":[1,2]}"""]);
+        var (_, batches) = await ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", source, new Dictionary<string, object?>
+        {
+            ["fields"] = new Dictionary<string, object?> { ["id"] = "string", ["region"] = "string", ["n"] = "int64", ["address.city"] = "string", ["tags"] = "json" },
+        }));
+        var target = CosmosFixture.NewName("roundtrip");
+        await cosmos.CreateContainerAsync(target, "/region");
+        var spec = new OutputSpec("cosmosdb", target, "append", "fail_on_change", new Dictionary<string, object?>());
+        await WriteAsync(cosmos, spec, batches[0].Schema, batches.ToArray());
+        var doc = Assert.Single(await cosmos.AllAsync(target));
+        Assert.Equal("Oslo", doc.GetProperty("address").GetProperty("city").GetString());
+        // The "json" field carries the value's raw wire text verbatim (DocumentBatchBuilder's
+        // documented no-reserialization contract), and the vNext emulator pretty-prints query
+        // responses -- verified directly against its raw bytes -- so the text the source read (and
+        // the sink wrote back unchanged, inside a JSON string) is "[\n  1,\n  2\n]", not the compact
+        // form the seed document was written with. Parsing it back is the structural comparison
+        // that survives that whitespace, matching the reordering accommodation already made for
+        // this same emulator quirk elsewhere in this file.
+        using var tags = System.Text.Json.JsonDocument.Parse(doc.GetProperty("tags").GetString()!);
+        Assert.Equal([1, 2], tags.RootElement.EnumerateArray().Select(e => e.GetInt32()));
+        foreach (var b in batches) b.Dispose();
+    }
 }
