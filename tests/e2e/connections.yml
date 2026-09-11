@@ -1,0 +1,16 @@
+# Both directions through the packaged connector: read the seeded container, write an append output.
+cosmos:
+  connector: cosmosdb
+  database: e2e
+  auth: account_key
+  endpoint: ${COSMOS_ENDPOINT}
+  account_key: ${COSMOS_KEY}
+  connection_mode: gateway
+  entities:
+    orders_in:
+      read:
+        container: orders_in
+    orders_out:
+      write:
+        container: orders_out
+        strategy: append

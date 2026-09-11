@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.CosmosDb.slnx -c Release
+      # ubuntu has docker, so the emulator-backed facts run; windows cannot pull Linux images, so it
+      # runs everything that is not server-backed. The live suite skips on both (no credentials).
+      - if: runner.os == 'Linux'
+        run: dotnet test Pz.Connector.CosmosDb.slnx -c Release --no-build --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+      - if: runner.os == 'Windows'
+        run: dotnet test Pz.Connector.CosmosDb.slnx -c Release --no-build --filter "Category!=Docker" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+
+  # The other half of the proof: a stranger declares the connector by package id, runs `pz restore`,
+  # and pz spawns the self-contained binary. The suite above never touches pz's resolver,
+  # materializer or process host; this job proves the publish, the generated manifest and the PCP
+  # handshake fit together against the released pz, with a live emulator on both ends.
+  pack-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish the host RID and pack
+        run: |
+          set -euo pipefail
+          # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet
+          # cache: the restore folded into `publish -r` alone does not pull the RID-specific runtime
+          # pack this self-contained build needs (NETSDK1112).
+          dotnet restore src/Pz.Connector.CosmosDb -r linux-x64
+          dotnet publish src/Pz.Connector.CosmosDb -c Release -r linux-x64 --no-restore
+          dotnet pack src/Pz.Connector.CosmosDb -c Release -o packages
+          ls packages
+          VERSION="$(ls packages/Pz.Connector.CosmosDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.CosmosDb\.(.*)\.nupkg|\1|')"
+          echo "PKG_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          PKG="packages/Pz.Connector.CosmosDb.${VERSION}.nupkg"
+          unzip -p "${PKG}" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "cosmosdb"' manifest.json
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge; do
+            grep -q "\"${cap}\"" manifest.json
+          done
+          ! grep -q '"ReplaceWrites"' manifest.json
+          unzip -l "${PKG}" | grep -q ' icon.png$'
+          unzip -l "${PKG}" | grep -q ' README.md$'
+      - name: Start the emulator
+        run: |
+          set -euo pipefail
+          docker run -d --name cosmos -p 8081:8081 -e PROTOCOL=http mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest
+          for i in $(seq 1 90); do
+            docker logs cosmos 2>&1 | grep -q "pgcosmos extension detected" && break
+            sleep 2
+          done
+          sleep 3
+          # Seed through the emulator's own shell: a database, two containers, three documents.
+          # e2e_probe's partition key is /value, not /id: `pz connector test`'s generic write probe
+          # (ConformanceSuite.BuildProbeBatch) always sends a fixed one-column schema
+          # {value: int64} with no `id` column, so the container's partition key path must resolve
+          # against that column or the write session is refused up front (PZCS0303).
+          docker exec cosmos cosmoshell.sh -c '
+            mkdb e2e;
+            mkcon orders_in /region --database=e2e;
+            mkcon orders_out /region --database=e2e;
+            mkcon e2e_probe /value --database=e2e;
+            mkitem -container orders_in --database=e2e "{\"id\":\"1\",\"region\":\"eu\",\"n\":1,\"name\":\"ann\",\"tags\":[\"a\"],\"address\":{\"city\":\"Paris\"}}";
+            mkitem -container orders_in --database=e2e "{\"id\":\"2\",\"region\":\"eu\",\"n\":2,\"name\":\"bob\",\"tags\":[\"b\",\"c\"],\"address\":{\"city\":\"Rome\"}}";
+            mkitem -container orders_in --database=e2e "{\"id\":\"3\",\"region\":\"us\",\"n\":3,\"name\":\"cy\",\"tags\":[],\"address\":{\"city\":\"Oslo\"}}"'
+      - name: Install pz, restore from the local feed, run, conformance-test
+        env:
+          COSMOS_ENDPOINT: http://localhost:8081/
+          COSMOS_KEY: C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==
+        run: |
+          set -euo pipefail
+          dotnet tool install --global pz --version 0.6.1
+          cd tests/e2e
+          sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
+          pz restore --feeds "${GITHUB_WORKSPACE}/packages"
+          PKG_DIR=".pz/packages/Pz.Connector.CosmosDb/${PKG_VERSION}"
+          test -f "${PKG_DIR}/native/Pz.Connector.CosmosDb"
+          pz run
+          count() { docker exec cosmos cosmoshell.sh -c "query \"SELECT VALUE COUNT(1) FROM c\" --database=e2e --container=orders_out" | tr -dc '0-9'; }
+          # cosmoshell's `query` wraps results as {"type":"item","values":[...]} and pretty-prints
+          # them (matching the emulator's own pretty-printed gateway responses, which the connector's
+          # `json`-kind columns capture verbatim, newlines included -- production Cosmos returns
+          # compact JSON, so this is an emulator-only quirk). jq parses that reliably; a literal grep
+          # for the array form of `tags` does not match, since it lands as a *string* column (the
+          # source read the array as a `json`-kind leaf, and the sink has no separate json write type,
+          # so it round-trips through Cosmos as the raw text of that property, quotes and all).
+          docker exec cosmos cosmoshell.sh -c 'query "SELECT * FROM c" --database=e2e --container=orders_out' | tee out.json
+          test "$(count)" = "3"
+          jq -e '[.values[] | select(.name=="bob")][0].city == "Rome"' out.json
+          jq -e '([.values[] | select(.name=="bob")][0].tags | fromjson) == ["b","c"]' out.json
+          # Append with explicit ids is at-least-once by contract but a re-run of the same ids is a
+          # 409 conflict the connector reports, so the second run fails: assert that honestly.
+          ! pz run
+          pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
+          ! grep -q '^FAIL' report.txt
