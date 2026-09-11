@@ -121,19 +121,10 @@ internal sealed class RowDocumentWriter
 
     private string ResolveId(RecordBatch batch, int row, long rowNumber)
     {
-        // Only a plain 'id' column value is checked against Cosmos DB's reserved-character rule:
-        // it is copied onto the document as-is. An id_from id is the connector's own construction
-        // -- EscapeIdPart already guarantees two different key tuples never collide -- so it is used
-        // verbatim, backslashes (the escape character) included.
         if (_idColumn >= 0)
         {
             var id = Text(batch.Column(_idColumn), row) ?? throw CosmosErrors.Fatal($"output '{_output}': 'id' is null in row {rowNumber}; every document needs an id", _redactor);
-            if (id.Length == 0 || id.Length > 255 || id.IndexOfAny(['/', '\\', '?', '#']) >= 0)
-            {
-                throw CosmosErrors.Fatal($"output '{_output}': '{id}' (row {rowNumber}) is not a valid Cosmos DB id: 1-255 characters, none of / \\ ? #", _redactor);
-            }
-
-            return id;
+            return ValidateId(id, rowNumber);
         }
 
         if (_idFromColumns.Length > 0)
@@ -141,14 +132,35 @@ internal sealed class RowDocumentWriter
             var parts = new string[_idFromColumns.Length];
             for (var i = 0; i < parts.Length; i++)
             {
-                parts[i] = EscapeIdPart(Text(batch.Column(_idFromColumns[i]), row)
-                    ?? throw CosmosErrors.Fatal($"output '{_output}': id_from column '{string.Join(".", _paths[_idFromColumns[i]])}' is null in row {rowNumber}", _redactor));
+                var column = string.Join(".", _paths[_idFromColumns[i]]);
+                var value = Text(batch.Column(_idFromColumns[i]), row)
+                    ?? throw CosmosErrors.Fatal($"output '{_output}': id_from column '{column}' is null in row {rowNumber}", _redactor);
+                if (value.IndexOfAny(['|', '/', '\\', '?', '#']) >= 0)
+                {
+                    throw CosmosErrors.Fatal($"output '{_output}': id_from column '{column}' holds '{value}' (row {rowNumber}), which contains a reserved character; id_from values must not contain | / \\ ? #", _redactor);
+                }
+
+                parts[i] = value;
             }
 
-            return string.Join("|", parts);
+            // Every part is already free of the reserved characters, so joining with '|' cannot
+            // create an ambiguous id -- two different key tuples never produce the same string.
+            return ValidateId(string.Join("|", parts), rowNumber);
         }
 
         return _newId();
+    }
+
+    /// <summary>The one rule Cosmos DB itself enforces on every id, whatever produced it: 1-255
+    /// characters, none of the four that make an id unusable as a URI segment.</summary>
+    private string ValidateId(string id, long rowNumber)
+    {
+        if (id.Length == 0 || id.Length > 255 || id.IndexOfAny(['/', '\\', '?', '#']) >= 0)
+        {
+            throw CosmosErrors.Fatal($"output '{_output}': '{id}' (row {rowNumber}) is not a valid Cosmos DB id: 1-255 characters, none of / \\ ? #", _redactor);
+        }
+
+        return id;
     }
 
     private PartitionKey ResolvePartitionKey(RecordBatch batch, int row, long rowNumber)
@@ -182,11 +194,6 @@ internal sealed class RowDocumentWriter
 
         return builder.Build();
     }
-
-    /// <summary>A pipe or backslash inside an id part is escaped so two different key tuples never
-    /// join to the same id.</summary>
-    public static string EscapeIdPart(string part) =>
-        part.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("|", "\\|", StringComparison.Ordinal);
 
     private static string? Text(IArrowArray column, int row) => column.IsNull(row) ? null : column switch
     {

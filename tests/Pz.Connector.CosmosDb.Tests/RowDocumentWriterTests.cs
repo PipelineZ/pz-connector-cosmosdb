@@ -58,9 +58,9 @@ public sealed class RowDocumentWriterTests
         Assert.Equal(new PartitionKey("42"), fromInt.PartitionKey);
 
         var keyed = new CosmosOutputConfig("orders", ["a", "b"], 32, 9);
-        var fromKeys = Write(Batch(("a", new StringArray.Builder().Append("x|y").Build()), ("b", new Int32Array.Builder().Append(3).Build()), ("pk", new StringArray.Builder().Append("p").Build())), 0, keyed, "/pk");
-        Assert.Equal("x\\|y|3", fromKeys.Id);
-        Assert.Equal("x\\|y|3", Parse(fromKeys).GetProperty("id").GetString());
+        var fromKeys = Write(Batch(("a", new StringArray.Builder().Append("x").Build()), ("b", new Int32Array.Builder().Append(3).Build()), ("pk", new StringArray.Builder().Append("p").Build())), 0, keyed, "/pk");
+        Assert.Equal("x|3", fromKeys.Id);
+        Assert.Equal("x|3", Parse(fromKeys).GetProperty("id").GetString());
 
         var generated = Write(Batch(("pk", new StringArray.Builder().Append("p").Build())), 0, Output, "/pk");
         Assert.Equal("generated-guid", generated.Id);
@@ -98,6 +98,27 @@ public sealed class RowDocumentWriterTests
     public void Invalid_ids_are_refused(string id)
     {
         var ex = Assert.Throws<PzConnectorException>(() => Write(Batch(("id", new StringArray.Builder().Append(id).Build()))));
+        Assert.Contains("is not a valid Cosmos DB id", ex.Message);
+    }
+
+    [Fact]
+    public void Id_from_values_with_separator_or_reserved_characters_fail_the_row()
+    {
+        var idFrom = new CosmosOutputConfig("orders", ["a"], 32, 9);
+
+        var pipe = Batch(("a", new StringArray.Builder().Append("x|y").Build()));
+        Assert.Contains("column 'a'", Assert.Throws<PzConnectorException>(() => Write(pipe, 0, idFrom)).Message);
+
+        var slash = Batch(("a", new StringArray.Builder().Append("x/y").Build()));
+        Assert.Contains("column 'a'", Assert.Throws<PzConnectorException>(() => Write(slash, 0, idFrom)).Message);
+    }
+
+    [Fact]
+    public void Composed_id_over_255_characters_is_refused()
+    {
+        var idFrom = new CosmosOutputConfig("orders", ["a"], 32, 9);
+        var batch = Batch(("a", new StringArray.Builder().Append(new string('x', 256)).Build()));
+        var ex = Assert.Throws<PzConnectorException>(() => Write(batch, 0, idFrom));
         Assert.Contains("is not a valid Cosmos DB id", ex.Message);
     }
 
