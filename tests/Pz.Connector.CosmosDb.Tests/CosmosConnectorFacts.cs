@@ -68,4 +68,118 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         ConsistencyLevel.Strong => "strong",
         _ => throw new ArgumentOutOfRangeException(nameof(level), level, "unknown consistency level"),
     };
+
+    private static async Task<(Apache.Arrow.Schema Schema, List<Apache.Arrow.RecordBatch> Batches)> ReadAllAsync(CosmosFixture cosmos, DatasetSpec spec, ReadHints? hints = null)
+    {
+        ISourceConnector connector = new CosmosConnector();
+        await using var source = await connector.OpenAsync(new ConnectorConfig(cosmos.ConnectionConfig()), CancellationToken.None);
+        var schema = (await source.GetSchemaAsync(spec, CancellationToken.None)).Schema;
+        var batches = new List<Apache.Arrow.RecordBatch>();
+        foreach (var partition in await source.PlanReadAsync(spec, hints ?? ReadHints.None, CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                batches.Add(batch);
+            }
+        }
+
+        return (schema, batches);
+    }
+
+    [SkippableFact]
+    public async Task Inferred_schema_flattens_and_reads_nested_documents()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(
+        [
+            """{"id":"a","n":1,"address":{"city":"Paris"},"tags":["x"],"price":"12.50"}""",
+            """{"id":"b","n":2,"address":{"city":"Rome"},"tags":[],"price":"7.25"}""",
+        ]);
+        var (schema, batches) = await ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", name, new Dictionary<string, object?>()));
+        // Cosmos DB's query engine reorders a "SELECT *" result's top-level properties (scalars and
+        // arrays ahead of nested objects) rather than preserving the document's own written order, so
+        // "address" -- flattened to "address.city" -- surfaces after "tags"/"price" here, not between
+        // "n" and "tags" as the document was written; verified against the emulator's raw response.
+        Assert.Equal(["n", "tags", "price", "address.city", "_ts", "id"], schema.FieldsList.Select(f => f.Name));
+        var rows = batches.Sum(b => b.Length);
+        Assert.Equal(2, rows);
+        foreach (var b in batches) b.Dispose();
+    }
+
+    [SkippableFact]
+    public async Task Declared_fields_and_column_pruning_shape_the_batches()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(CosmosFixture.Rows(5));
+        var spec = new DatasetSpec("cosmosdb", name, new Dictionary<string, object?>
+        {
+            ["fields"] = new Dictionary<string, object?> { ["n"] = "int64", ["name"] = "string", ["_ts"] = "timestamp" },
+        });
+        var (_, batches) = await ReadAllAsync(cosmos, spec, new ReadHints(Columns: ["name", "n"]));
+        var batch = Assert.Single(batches);
+        Assert.Equal(["name", "n"], batch.Schema.FieldsList.Select(f => f.Name));
+        batch.Dispose();
+    }
+
+    [SkippableFact]
+    public async Task User_query_is_honoured_and_bounds_apply_on_top()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(CosmosFixture.Rows(20));
+        var spec = new DatasetSpec("cosmosdb", name, new Dictionary<string, object?>
+        {
+            ["query"] = "SELECT c.id, c.n FROM c WHERE c.n < 15",
+            ["fields"] = new Dictionary<string, object?> { ["n"] = "int64" },
+        }) { WatermarkCursor = "n", WatermarkValue = "9" };
+        var (_, batches) = await ReadAllAsync(cosmos, spec);
+        var values = batches.SelectMany(b => Enumerable.Range(0, b.Length).Select(i => ((Apache.Arrow.Int64Array)b.Column(0)).GetValue(i)!.Value)).Order().ToList();
+        Assert.Equal([10L, 11L, 12L, 13L, 14L], values);
+        foreach (var b in batches) b.Dispose();
+    }
+
+    [SkippableFact]
+    public async Task Ts_is_a_usable_cursor()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(CosmosFixture.Rows(3));
+        var spec = new DatasetSpec("cosmosdb", name, new Dictionary<string, object?>()) { WatermarkCursor = "_ts", WatermarkValue = "0" };
+        var (_, batches) = await ReadAllAsync(cosmos, spec);
+        Assert.Equal(3, batches.Sum(b => b.Length));
+        foreach (var b in batches) b.Dispose();
+    }
+
+    [SkippableFact]
+    public async Task Empty_container_without_fields_is_refused_and_missing_container_is_named()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var empty = CosmosFixture.NewName("empty");
+        await cosmos.CreateContainerAsync(empty);
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", empty, new Dictionary<string, object?>())));
+        Assert.Contains("declare the columns under fields:", ex.Message);
+
+        var missing = await Assert.ThrowsAsync<PzConnectorException>(() => ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", "no_such_container", new Dictionary<string, object?>())));
+        Assert.Contains("container 'no_such_container' does not exist", missing.Message);
+        Assert.False(missing.IsTransient);
+    }
+
+    [SkippableFact]
+    public async Task A_lossy_value_names_the_document()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(["""{"id":"bad-one","n":1.5}"""]);
+        var spec = new DatasetSpec("cosmosdb", name, new Dictionary<string, object?> { ["fields"] = new Dictionary<string, object?> { ["n"] = "int64" } });
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => ReadAllAsync(cosmos, spec));
+        Assert.Contains("field 'n' of document bad-one", ex.Message);
+    }
+
+    [SkippableFact]
+    public async Task Query_syntax_errors_are_fatal_with_the_service_reason()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(CosmosFixture.Rows(1));
+        var spec = new DatasetSpec("cosmosdb", name, new Dictionary<string, object?> { ["query"] = "SELECT FROM WHERE", ["fields"] = new Dictionary<string, object?> { ["n"] = "int64" } });
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => ReadAllAsync(cosmos, spec));
+        Assert.False(ex.IsTransient);
+        Assert.Contains("(400", ex.Message);
+    }
 }

@@ -9,7 +9,7 @@ namespace Pz.Connector.CosmosDb;
 /// <summary>Azure Cosmos DB (NoSQL API) for pz: a container is a table-shaped dataset typed from a
 /// declared or sampled schema and read one feed range per partition; a sink output creates or
 /// upserts each row as one document under the container's own (partition key, id) identity.</summary>
-public sealed class CosmosConnector : IConnector
+public sealed class CosmosConnector : IConnector, ISourceConnector
 {
     private readonly ILoggerFactory _loggerFactory;
 
@@ -108,6 +108,12 @@ public sealed class CosmosConnector : IConnector
             // Every failure is a failed probe, never a crash. Cancellation is not a probe result.
             return new ConnectionCheck(false, CosmosErrors.Wrap(ex, connection.Redactor, "checking the connection").Message);
         }
+    }
+
+    ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var connection = ParseOrThrow(config);
+        return ValueTask.FromResult<ISource>(new CosmosSource(connection, CosmosClientFactory.Create(connection), _loggerFactory.CreateLogger<CosmosSource>()));
     }
 
     internal static CosmosConnectionConfig ParseOrThrow(ConnectorConfig config)
