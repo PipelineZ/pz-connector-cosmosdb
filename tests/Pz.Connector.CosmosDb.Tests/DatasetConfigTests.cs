@@ -59,7 +59,7 @@ public sealed class DatasetConfigTests
         Assert.Contains(errors, e => e.Contains("'fields' must be a mapping", StringComparison.Ordinal));
         Assert.Contains(errors, e => e.Contains("'sample_size' must be an integer between 1 and 100000", StringComparison.Ordinal));
         Assert.Contains(errors, e => e.Contains("'page_size' must be an integer between 1 and 10000", StringComparison.Ordinal));
-        Assert.Contains(errors, e => e.Contains("'partitions' must be auto or an integer", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.Contains("'partitions' must be an integer of at least 1", StringComparison.Ordinal));
         Assert.Contains(errors, e => e.Contains("unknown read option 'bogus'", StringComparison.Ordinal));
     }
 

@@ -1,4 +1,3 @@
-using System.Globalization;
 using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.CosmosDb;
@@ -65,14 +64,9 @@ internal sealed record CosmosDatasetConfig(
             {
                 partitions = null;
             }
-            else if (partitionsRaw is not string && partitionsRaw is IFormattable f
-                     && int.TryParse(f.ToString(null, CultureInfo.InvariantCulture), out var n) && n >= 1)
-            {
-                partitions = n;
-            }
             else
             {
-                errors.Add($"{prefix}: 'partitions' must be auto or an integer of at least 1");
+                partitions = Options.Int(spec.Options, "partitions", 1, 1, int.MaxValue, prefix, errors);
             }
         }
 
