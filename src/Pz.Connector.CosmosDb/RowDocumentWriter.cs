@@ -223,7 +223,9 @@ internal sealed class RowDocumentWriter
                 break;
             case Int64Array a:
                 var l = a.GetValue(row)!.Value;
-                if (Math.Abs(l) > MaxExactInteger)
+                // Range-compared, never Math.Abs: long.MinValue has no positive counterpart and
+                // would throw an OverflowException instead of the refusal below.
+                if (l < -MaxExactInteger || l > MaxExactInteger)
                 {
                     throw CosmosErrors.Fatal($"output '{_output}': column '{string.Join(".", path)}' of document '{id}' (row {rowNumber}) holds {l}, beyond ±2^53, which a Cosmos DB number cannot hold exactly (PZCS0305); cast it to varchar", _redactor);
                 }

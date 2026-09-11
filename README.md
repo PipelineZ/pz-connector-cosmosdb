@@ -110,7 +110,10 @@ columns, and arrays, mixed-type fields, and fields under a dynamic-key object la
 raw JSON text). More than 2000 field paths is a refusal naming the ceiling. A document field whose
 own name contains a dot is refused during sampling, naming the field and the document's `id` (it
 would silently collide with the flattened path of the same name); under `fields:` a dotted key is
-always a path, never a literal.
+always a path, never a literal. The sample is ordered by `_ts`, and Cosmos DB excludes from an
+`ORDER BY` every item whose ordering property is undefined — so a custom `query:` **must project
+`c._ts`** to be inferable at all (a query that does not is refused naming `_ts`); the alternative is
+to declare `fields:`.
 
 **Numbers.** JSON numbers arrive untyped — Cosmos stores every number as an IEEE double.
 Inference: every sampled value integral and within ±2^53 → `int64`; any fractional value →
@@ -127,8 +130,10 @@ do not count for inference.
 
 **System properties.** `_rid`, `_self`, `_etag`, `_attachments` are excluded from inference and
 from the default projection (declaring them under `fields:` as `string` still works). `_ts`
-(int64 epoch seconds) is inferred as `int64`. `id` is always the trailing column, even when nothing
-else wants it, so a refusal can always name the document.
+(int64 epoch seconds) is inferred as `int64`. An **inferred** schema always ends with `id`, even
+when no other column wants it, and the default query's projection always asks for `id`, so a refusal
+can name the document; a **declared** `fields:` schema is exactly the columns declared, in the order
+declared, and carries `id` only if you declare it.
 
 The engine's own `columns:` read option (stamped from a dataset's `columns:` contract) is accepted
 and ignored — the plan always comes from `fields:` or inference.
@@ -154,7 +159,9 @@ where placed_at > {{ watermark('cosmos', 'orders') }}
 
 The cursor column must be `int32`, `int64`, `double`, `timestamp` or `date`; `string`, `bool`,
 `json` and `decimal` cursors are refused naming the column (`decimal`'s wire form is a string,
-which would compare ordinally, not numerically). Bounds are applied by wrapping the query, never by
+which would compare ordinally, not numerically). It must also be a **top-level property**: a dotted
+(nested) cursor is refused, because pz stores watermarks by column name and a dotted cursor never
+reaches the engine intact. Bounds are applied by wrapping the query, never by
 rewriting your `WHERE`: `SELECT * FROM (<query>) c WHERE c["<cursor>"] > @pz_lower AND
 c["<cursor>"] <= @pz_upper` (`>=` on the lower bound when the engine's bound is inclusive; each
 clause appears only when the engine supplies that bound). A `timestamp` or `date` cursor other than
@@ -221,6 +228,12 @@ Type spelling on write:
 | `timestamp` | ISO-8601 UTC with microseconds |
 | `string` | string |
 | null (any type) | JSON `null` — the property is present, not omitted, so a `merge` can clear a previously-set value |
+
+A column the source read as `json` arrives at the sink as pz `string` — its raw JSON **text** — and
+is written back as a JSON **string**, not re-parsed into an array or object: `[1,2]` round-trips as
+`"[1,2]"`. The sink never re-interprets a value's text, and pz has no nested column type to carry
+one; a document that must land with a real array or object needs that shape built from columns
+(dotted names nest) rather than carried through as `json`.
 
 A serialised document over 2 MB is refused as `PZCS0306` naming `id`, before it is sent.
 

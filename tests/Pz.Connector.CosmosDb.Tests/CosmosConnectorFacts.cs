@@ -96,11 +96,11 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
             """{"id":"b","n":2,"address":{"city":"Rome"},"tags":[],"price":"7.25"}""",
         ]);
         var (schema, batches) = await ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", name, new Dictionary<string, object?>()));
-        // Cosmos DB's query engine reorders a "SELECT *" result's top-level properties (scalars and
-        // arrays ahead of nested objects) rather than preserving the document's own written order, so
-        // "address" -- flattened to "address.city" -- surfaces after "tags"/"price" here, not between
-        // "n" and "tags" as the document was written; verified against the emulator's raw response.
-        Assert.Equal(["n", "tags", "price", "address.city", "_ts", "id"], schema.FieldsList.Select(f => f.Name));
+        // Only the set of inferred columns and id's trailing position are the connector's own
+        // contract: a "SELECT *" result's top-level property order is the query engine's, and
+        // asserting the emulator's is asserting something a real account need not reproduce.
+        Assert.Equal(["_ts", "address.city", "id", "n", "price", "tags"], schema.FieldsList.Select(f => f.Name).OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal("id", schema.FieldsList[^1].Name);
         var rows = batches.Sum(b => b.Length);
         Assert.Equal(2, rows);
         foreach (var b in batches) b.Dispose();
@@ -160,6 +160,23 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         var missing = await Assert.ThrowsAsync<PzConnectorException>(() => ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", "no_such_container", new Dictionary<string, object?>())));
         Assert.Contains("container 'no_such_container' does not exist", missing.Message);
         Assert.False(missing.IsTransient);
+    }
+
+    /// <summary>Sampling orders by _ts, so a query that does not project it is never inferable: the
+    /// service either drops every item from the ordering or rejects the ordering outright (the
+    /// vnext emulator answers this one with a 400). Either way the refusal, not just the status,
+    /// has to name _ts and fields: -- a container full of documents reported as "no document"
+    /// sends the author looking for missing data.</summary>
+    [SkippableFact]
+    public async Task A_query_that_does_not_project_ts_is_refused_naming_ts_and_fields()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = await cosmos.SeedAsync(CosmosFixture.Rows(3));
+        var spec = new DatasetSpec("cosmosdb", name, new Dictionary<string, object?> { ["query"] = "SELECT c.id, c.n FROM c" });
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => ReadAllAsync(cosmos, spec));
+        Assert.False(ex.IsTransient);
+        Assert.Contains("c._ts", ex.Message);
+        Assert.Contains("fields:", ex.Message);
     }
 
     [SkippableFact]
@@ -264,6 +281,32 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         Assert.False(ex.IsTransient);
         Assert.Contains("(409", ex.Message);
         Assert.Contains("'a'", ex.Message);
+    }
+
+    /// <summary>The engine disposes a session whose commit failed without calling AbortAsync, so
+    /// dispose must drain what is still on the wire before it disposes the semaphore those requests
+    /// release (and before the sink disposes their client): it must neither throw nor hang.</summary>
+    [SkippableFact]
+    public async Task Dispose_after_a_failed_commit_drains_instead_of_throwing()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = CosmosFixture.NewName("commit_fail");
+        await cosmos.CreateContainerAsync(name, "/region");
+        var spec = new OutputSpec("cosmosdb", name, "append", "fail_on_change", new Dictionary<string, object?>());
+        using var seed = Rows(("a", "eu", 1));
+        await WriteAsync(cosmos, spec, seed.Schema, seed);
+
+        ISinkConnector connector = new CosmosConnector();
+        await using var sink = await connector.OpenAsync(new ConnectorConfig(cosmos.ConnectionConfig()), CancellationToken.None);
+        var session = await sink.BeginWriteAsync(spec, seed.Schema, CancellationToken.None);
+        using var batch = Rows(("b", "eu", 1), ("a", "eu", 2));
+        await session.WriteBatchAsync(batch, CancellationToken.None);
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await session.CommitAsync(CancellationToken.None));
+        Assert.False(ex.IsTransient);
+        Assert.Contains("(409", ex.Message);
+
+        await session.DisposeAsync();
+        Assert.Equal(2, (await cosmos.AllAsync(name)).Count);
     }
 
     [SkippableFact]

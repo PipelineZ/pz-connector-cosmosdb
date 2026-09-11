@@ -28,6 +28,9 @@ public sealed class ColumnPlanTests
         Assert.Equal(["id", "a"], plan.Project(["id", "a"]).Columns.Select(c => c.Name));
         Assert.Same(plan, plan.Project(["zzz"]));
         Assert.Same(plan, plan.Project(null));
+        // Cosmos DB property names are case-sensitive, so a hint differing only by case names a
+        // property this plan does not have: unusable, not a match.
+        Assert.Same(plan, plan.Project(["A"]));
     }
 
     // ColumnKind is `internal`; InternalsVisibleTo makes it usable inside this assembly's method
@@ -63,5 +66,16 @@ public sealed class ColumnPlanTests
         errors.Clear();
         ColumnPlan.ValidateNames(Enumerable.Range(0, ColumnPlan.MaxColumns + 1).Select(i => $"c{i}").ToList(), "p", errors);
         Assert.Contains(errors, e => e.Contains($"more than the {ColumnPlan.MaxColumns}", StringComparison.Ordinal));
+    }
+
+    /// <summary>An exactly repeated name is a reported error, once, not a throw out of the
+    /// dictionary every caller keys its columns by.</summary>
+    [Fact]
+    public void Name_validation_refuses_an_exact_duplicate_once()
+    {
+        var errors = new List<string>();
+        ColumnPlan.ValidateNames(["x", "y", "x", "x"], "p", errors);
+        var error = Assert.Single(errors);
+        Assert.Equal("p: column 'x' is declared more than once", error);
     }
 }

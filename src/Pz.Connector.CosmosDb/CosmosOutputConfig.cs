@@ -74,7 +74,14 @@ internal sealed record CosmosOutputConfig(string Container, IReadOnlyList<string
     public static void ValidateSchema(OutputSpec spec, CosmosOutputConfig output, Schema schema, IReadOnlyList<string> partitionKeyPaths, List<string> errors)
     {
         var prefix = $"output '{spec.Output}'";
-        var columns = schema.FieldsList.ToDictionary(f => f.Name, f => f, StringComparer.Ordinal);
+        // First-wins rather than ToDictionary: a schema carrying the same name twice must be
+        // reported by ValidateNames alongside every other error, not thrown out of validation.
+        var columns = new Dictionary<string, Field>(StringComparer.Ordinal);
+        foreach (var field in schema.FieldsList)
+        {
+            columns.TryAdd(field.Name, field);
+        }
+
         foreach (var field in schema.FieldsList)
         {
             if (!DocumentTypes.Contains(field.DataType.TypeId))

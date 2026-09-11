@@ -32,8 +32,13 @@ internal sealed class CosmosPartition(
                 ct.ThrowIfCancellationRequested();
                 using var page = await NextPageAsync(iterator, context, ct).ConfigureAwait(false);
                 pages++;
-                using var document = await JsonDocument.ParseAsync(page.Content, cancellationToken: ct).ConfigureAwait(false);
-                foreach (var item in document.RootElement.GetProperty("Documents").EnumerateArray())
+                using var document = await ParsePageAsync(page, context, ct).ConfigureAwait(false);
+                if (!document.RootElement.TryGetProperty("Documents", out var documents))
+                {
+                    throw CosmosErrors.Fatal($"{context}: the query response carried no 'Documents' array", connection.Redactor);
+                }
+
+                foreach (var item in documents.EnumerateArray())
                 {
                     builder.Append(item);
                     rows++;
@@ -51,6 +56,21 @@ internal sealed class CosmosPartition(
         }
 
         logger.LogDebug("cosmosdb: dataset {Dataset}: {Rows} documents in {Pages} pages over {Ranges} feed range(s)", spec.Dataset, rows, pages, ranges.Count);
+    }
+
+    /// <summary>The page body, classified like every other failure: a truncated or non-JSON
+    /// response is the service's text reaching us, so it goes through the redactor and the
+    /// connector prefix rather than out as a raw <see cref="JsonException"/>.</summary>
+    private async Task<JsonDocument> ParsePageAsync(ResponseMessage page, string context, CancellationToken ct)
+    {
+        try
+        {
+            return await JsonDocument.ParseAsync(page.Content, cancellationToken: ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw CosmosErrors.Wrap(ex, connection.Redactor, context);
+        }
     }
 
     private async Task<ResponseMessage> NextPageAsync(FeedIterator iterator, string context, CancellationToken ct)

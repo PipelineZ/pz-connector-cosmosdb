@@ -64,9 +64,13 @@ internal sealed class ColumnPlan
     }
 
     /// <summary>Narrows to the named columns, in the hint's order -- the engine narrows its staging
-    /// table on the declared capability and refuses a batch shaped otherwise. A name this plan does
-    /// not have means the hint is unusable, and the full plan is returned -- the engine then drops
-    /// the hint the same way and the pipeline's SQL reports the unknown column.</summary>
+    /// table on the declared capability and refuses a batch shaped otherwise. Names are matched
+    /// ordinally: Cosmos DB property names are case-sensitive, so a hint differing only by case
+    /// names a different property, and matching it case-insensitively here would read the wrong one
+    /// (<see cref="ValidateNames"/> already forbids two columns that differ only by case, so an
+    /// ordinal match is never ambiguous). A name this plan does not have means the hint is unusable,
+    /// and the full plan is returned -- the engine then drops the hint the same way and the
+    /// pipeline's SQL reports the unknown column.</summary>
     public ColumnPlan Project(IReadOnlyList<string>? columns)
     {
         if (columns is not { Count: > 0 })
@@ -77,7 +81,7 @@ internal sealed class ColumnPlan
         var kept = new List<ColumnSpec>(columns.Count);
         foreach (var name in columns)
         {
-            var column = Columns.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+            var column = Columns.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.Ordinal));
             if (column is null)
             {
                 return this;
@@ -120,8 +124,10 @@ internal sealed class ColumnPlan
     }
 
     /// <summary>Column names are JSON paths and DuckDB identifiers at once: one must not be a
-    /// prefix path of another (the sink could not nest them), and two must not differ only by case
-    /// (DuckDB would fold them together).</summary>
+    /// prefix path of another (the sink could not nest them), two must not differ only by case
+    /// (DuckDB would fold them together), and the same name must not appear twice -- every caller
+    /// keys its columns by name, so a repeat is a reported error here rather than a throw from a
+    /// dictionary build later.</summary>
     public static void ValidateNames(IReadOnlyList<string> names, string prefix, List<string> errors)
     {
         if (names.Count > MaxColumns)
@@ -132,11 +138,19 @@ internal sealed class ColumnPlan
 
         var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var exact = new HashSet<string>(names, StringComparer.Ordinal);
+        var reported = new HashSet<string>(StringComparer.Ordinal);
         foreach (var name in names)
         {
-            if (seen.TryGetValue(name, out var other) && !string.Equals(other, name, StringComparison.Ordinal))
+            if (seen.TryGetValue(name, out var other))
             {
-                errors.Add($"{prefix}: fields '{other}' and '{name}' differ only by case, which SQL cannot tell apart; declare one of them under fields: with another name or drop it");
+                if (!string.Equals(other, name, StringComparison.Ordinal))
+                {
+                    errors.Add($"{prefix}: fields '{other}' and '{name}' differ only by case, which SQL cannot tell apart; declare one of them under fields: with another name or drop it");
+                }
+                else if (reported.Add(name))
+                {
+                    errors.Add($"{prefix}: column '{name}' is declared more than once");
+                }
             }
 
             seen.TryAdd(name, name);

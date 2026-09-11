@@ -158,7 +158,10 @@ internal sealed class DocumentBatchBuilder
             return ts;
         }
 
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var seconds) && Math.Abs(seconds) <= MaxExactInteger)
+        // Range-compared, never Math.Abs: long.MinValue has no positive counterpart and would throw
+        // an OverflowException out of the read instead of the refusal below.
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var seconds)
+            && seconds >= -MaxExactInteger && seconds <= MaxExactInteger)
         {
             try
             {

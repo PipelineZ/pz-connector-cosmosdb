@@ -68,6 +68,20 @@ public sealed class DocumentBatchBuilderTests
         Assert.False(ex.IsTransient);
     }
 
+    /// <summary>long.MinValue has no positive counterpart: the timestamp column's exact-integer
+    /// range check must be a comparison, not Math.Abs, or the read dies of an OverflowException
+    /// instead of the refusal every other out-of-range value gets. An int64 column takes it, the
+    /// way it takes any other integer the wire spells.</summary>
+    [Fact]
+    public void Long_min_value_refuses_as_a_timestamp_and_reads_as_an_int64()
+    {
+        var json = $$"""{"id":"d9","v":{{long.MinValue}}}""";
+        var ex = Assert.Throws<PzConnectorException>(() => Convert(ColumnKind.Timestamp, json));
+        Assert.Contains("field 'v' of document d9", ex.Message);
+        Assert.Contains("where a timestamp is planned", ex.Message);
+        Assert.Equal(long.MinValue, Convert(ColumnKind.Int64, json));
+    }
+
     [Fact]
     public void Batches_are_cut_by_row_ceiling_and_flushed()
     {

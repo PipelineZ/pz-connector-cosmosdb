@@ -88,9 +88,27 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
     {
         ThrowIfFinished();
         _committed = true;
-        await Task.WhenAll(_pending).ConfigureAwait(false);
-        _pending.Clear();
-        _lastByIdentity.Clear();
+        try
+        {
+            await Task.WhenAll(_pending).ConfigureAwait(false);
+        }
+        finally
+        {
+            // The first fault is the one thrown; the rest are drained so no request is still in
+            // flight when the caller disposes the session (and its semaphore) behind the throw.
+            try
+            {
+                await Task.WhenAll(_pending).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Already reported by the throw this finally runs under.
+            }
+
+            _pending.Clear();
+            _lastByIdentity.Clear();
+        }
+
         _logger.LogDebug("cosmosdb: output {Output}: committed {Rows} rows in {Batches} batches", _outputName, _rows, _batches);
         return new WriteResult(_rows, _batches);
     }
@@ -113,15 +131,38 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
         {
             _logger.LogDebug("cosmosdb: output {Output}: a request failed during abort ({Reason})", _outputName, _redactor.Redact(ex.Message));
         }
-
-        _pending.Clear();
-        _lastByIdentity.Clear();
+        finally
+        {
+            // Cleared even when the wait was cancelled: a populated _pending would make the dispose
+            // below wait all over again on tasks nobody is listening to.
+            _pending.Clear();
+            _lastByIdentity.Clear();
+        }
     }
 
-    public ValueTask DisposeAsync()
+    /// <summary>The engine may dispose a session after a failed commit without ever calling
+    /// <see cref="AbortAsync"/>, so dispose must not pull the semaphore -- or, one level up, the
+    /// sink's client -- out from under a request still on the wire: anything still pending is
+    /// awaited first, and its outcome no longer matters.</summary>
+    public async ValueTask DisposeAsync()
     {
+        if (_pending.Count > 0)
+        {
+            try
+            {
+                await Task.WhenAll(_pending).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Nobody is left to report to: the failure that skipped commit and abort is the
+                // one the run already carries.
+            }
+
+            _pending.Clear();
+            _lastByIdentity.Clear();
+        }
+
         _inFlight.Dispose();
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>The (partition key, id) tuple the destination upserts on, as a stable dictionary

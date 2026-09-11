@@ -131,6 +131,17 @@ public sealed class RowDocumentWriterTests
         Assert.Contains("NaN", Assert.Throws<PzConnectorException>(() => Write(nan)).Message);
     }
 
+    /// <summary>long.MinValue has no positive counterpart: the magnitude check must be a
+    /// comparison, not Math.Abs, or the write dies of an OverflowException instead of PZCS0305.</summary>
+    [Fact]
+    public void Long_min_value_is_refused_as_PZCS0305()
+    {
+        var batch = Batch(("id", new StringArray.Builder().Append("k").Build()), ("v", new Int64Array.Builder().Append(long.MinValue).Build()));
+        var ex = Assert.Throws<PzConnectorException>(() => Write(batch));
+        Assert.Contains("PZCS0305", ex.Message);
+        Assert.Contains(long.MinValue.ToString(System.Globalization.CultureInfo.InvariantCulture), ex.Message);
+    }
+
     [Fact]
     public void Oversized_documents_are_refused_naming_the_id()
     {

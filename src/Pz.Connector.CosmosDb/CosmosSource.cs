@@ -109,6 +109,15 @@ internal sealed class CosmosSource(CosmosConnectionConfig connection, CosmosClie
     {
         var redactor = connection.Redactor;
         var context = $"dataset '{spec.Dataset}': sampling '{dataset.Container}'";
+        // The sample is ordered by _ts, which a dataset's own query must therefore project: a
+        // projection without it is either sampled as nothing (the service drops from an ORDER BY
+        // every item whose ordering property is undefined) or rejected outright as an unmappable
+        // ordering, and neither outcome names _ts on its own. Every non-transient sampling failure
+        // of a dataset that carries a query says so; a transient one is about the service, not the
+        // query, and keeps the plain context.
+        var refusal = dataset.Query is null
+            ? context
+            : context + " (the sample is ordered by _ts, so the dataset's own query must project c._ts, or the dataset must declare fields:)";
         var container = _database.GetContainer(dataset.Container);
         var inference = new SchemaInference(spec.Dataset, redactor);
         try
@@ -125,11 +134,16 @@ internal sealed class CosmosSource(CosmosConnectionConfig connection, CosmosClie
 
                 if (!page.IsSuccessStatusCode)
                 {
-                    throw CosmosErrors.FromResponse(page, redactor, context);
+                    throw CosmosErrors.FromResponse(page, redactor, CosmosErrors.IsTransientStatus(page.StatusCode) ? context : refusal);
                 }
 
                 using var document = await JsonDocument.ParseAsync(page.Content, cancellationToken: ct).ConfigureAwait(false);
-                foreach (var item in document.RootElement.GetProperty("Documents").EnumerateArray())
+                if (!document.RootElement.TryGetProperty("Documents", out var documents))
+                {
+                    throw CosmosErrors.Fatal($"{context}: the query response carried no 'Documents' array", redactor);
+                }
+
+                foreach (var item in documents.EnumerateArray())
                 {
                     inference.Observe(item);
                 }
@@ -137,13 +151,26 @@ internal sealed class CosmosSource(CosmosConnectionConfig connection, CosmosClie
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            throw CosmosErrors.Wrap(ex, redactor, context);
+            // Classified once, then re-issued against the refusal context when the outcome is
+            // fatal; an exception that is already ours (a refusal thrown above) passes through
+            // either call unchanged, so it is never decorated twice.
+            var failure = CosmosErrors.Wrap(ex, redactor, context);
+            throw dataset.Query is not null && failure is PzConnectorException { IsTransient: false }
+                ? CosmosErrors.Wrap(ex, redactor, refusal)
+                : failure;
         }
 
         if (inference.Documents == 0)
         {
+            // With a user query the empty sample is almost never an empty container: the sample is
+            // ordered by _ts, and Cosmos DB drops from an ORDER BY every item whose ordering
+            // property is undefined -- which a projection that does not carry _ts makes every item.
+            // Naming the container alone would send the author looking for missing data.
             throw CosmosErrors.Fatal(
-                $"dataset '{spec.Dataset}': '{dataset.Container}' has no document matching the query to infer a schema from; declare the columns under fields:", redactor);
+                dataset.Query is null
+                    ? $"dataset '{spec.Dataset}': '{dataset.Container}' has no document matching the query to infer a schema from; declare the columns under fields:"
+                    : $"dataset '{spec.Dataset}': the 'query:' of '{dataset.Container}' returned no document to infer a schema from; the sample is ordered by '_ts', which a query must project (add c._ts to its SELECT list) for its items to be sampled at all -- otherwise declare the columns under fields:",
+                redactor);
         }
 
         var plan = inference.Plan();

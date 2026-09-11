@@ -99,6 +99,15 @@ public sealed class OutputConfigTests
         Assert.Contains(errors, e => e.Contains("id_from entry 'd' is a Double column", StringComparison.Ordinal));
     }
 
+    /// <summary>A schema carrying the same column name twice is reported alongside every other
+    /// error, not thrown out of validation by the dictionary build.</summary>
+    [Fact]
+    public void A_duplicate_column_name_is_an_error_not_a_throw()
+    {
+        var errors = Validate(Spec("append"), Schema(("id", StringType.Default), ("x", StringType.Default), ("x", Int64Type.Default)));
+        Assert.Contains(errors, e => e.Contains("column 'x' is declared more than once", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Nested_columns_must_be_adjacent()
     {
