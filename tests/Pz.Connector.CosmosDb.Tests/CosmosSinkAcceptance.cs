@@ -10,7 +10,9 @@ namespace Pz.Connector.CosmosDb.Tests;
 /// connector stores each row as {"id":"<n>","name":...} in a container partitioned on /id, so
 /// read-back parses the string id back into the Int64 column. Containers are created per
 /// test-class instance (xunit instantiates per fact) with fresh names, so facts never see each
-/// other's documents. Replace is asserted as a refusal.</summary>
+/// other's documents. <see cref="ReplaceOutput"/> is left at its null default, so the kit's own
+/// replace fact no-ops here; the refusal itself is asserted in
+/// <see cref="CosmosConnectorFacts.Replace_is_refused_before_touching_the_container"/>.</summary>
 [Collection("cosmosdb")]
 [Trait("Category", "Docker")]
 public sealed class CosmosSinkAcceptance : SinkConnectorAcceptanceTests

@@ -232,6 +232,24 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         Assert.Equal(10, docs.Single(d => d.GetProperty("id").GetString() == "a").GetProperty("n").GetInt64());
     }
 
+    /// <summary>Pins the same-identity chain in CosmosWriteSession: two rows sharing (partition
+    /// key, id), sent as one batch through one merge session, must not race on the wire -- the
+    /// second row's value is the one that survives.</summary>
+    [SkippableFact]
+    public async Task Merge_two_rows_of_the_same_identity_in_one_batch_resolve_last_writer_wins()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var name = CosmosFixture.NewName("merge_dup");
+        await cosmos.CreateContainerAsync(name, "/region");
+        var spec = new OutputSpec("cosmosdb", name, "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id"] };
+        using var batch = Rows(("a", "eu", 1), ("a", "eu", 2));
+        var result = await WriteAsync(cosmos, spec, batch.Schema, batch);
+        Assert.Equal(2, result.RowsWritten);
+        var docs = await cosmos.AllAsync(name);
+        var doc = Assert.Single(docs);
+        Assert.Equal(2, doc.GetProperty("n").GetInt64());
+    }
+
     [SkippableFact]
     public async Task Append_conflict_on_an_explicit_id_is_fatal()
     {

@@ -1,4 +1,3 @@
-using System.Net;
 using Apache.Arrow;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Logging;
@@ -23,11 +22,14 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
     private readonly RowDocumentWriter _writer;
     private readonly SemaphoreSlim _inFlight;
     private readonly List<Task> _pending = [];
-    // Duplicate identities within one session (same partition key + id, written twice as two
-    // separate rows) are otherwise sent to the wire concurrently: bulk mode gives no ordering
-    // guarantee across requests issued that way, so which one "wins" the upsert would be a race
-    // rather than the mandated last-writer-wins. Chaining a repeated identity's send after its
-    // predecessor's completion is what actually makes submission order the outcome.
+    // Duplicate identities within one merge session (same partition key + id, written twice as
+    // two rows) are otherwise sent to the wire concurrently: bulk mode gives no ordering guarantee
+    // across requests issued that way, so which one "wins" the upsert would be a race rather than
+    // the mandated last-writer-wins. Chaining a repeated identity's send after its predecessor's
+    // completion is what actually makes submission order the outcome. Append mode never chains:
+    // every generated id is distinct and a duplicate explicit id is a 409 either way, so tracking
+    // identities there would only ever grow the map. Entries are pruned as their task completes
+    // (DrainCompletedAsync) and the map is cleared once the session finishes.
     private readonly Dictionary<string, Task> _lastByIdentity = new(StringComparer.Ordinal);
     private readonly ItemRequestOptions _requestOptions = new() { EnableContentResponseOnWrite = false };
     private long _rows;
@@ -58,10 +60,20 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
             var document = _writer.Write(batch, row, _rows + 1);
             _rows++;
             await _inFlight.WaitAsync(ct).ConfigureAwait(false);
-            var identity = IdentityOf(document);
-            _lastByIdentity.TryGetValue(identity, out var previous);
+            Task? previous = null;
+            string? identity = null;
+            if (_upsert)
+            {
+                identity = IdentityOf(document);
+                _lastByIdentity.TryGetValue(identity, out previous);
+            }
+
             var send = SendAsync(document, previous, ct);
-            _lastByIdentity[identity] = send;
+            if (identity is not null)
+            {
+                _lastByIdentity[identity] = send;
+            }
+
             _pending.Add(send);
             if (_pending.Count >= _output.Concurrency * 2)
             {
@@ -78,6 +90,7 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
         _committed = true;
         await Task.WhenAll(_pending).ConfigureAwait(false);
         _pending.Clear();
+        _lastByIdentity.Clear();
         _logger.LogDebug("cosmosdb: output {Output}: committed {Rows} rows in {Batches} batches", _outputName, _rows, _batches);
         return new WriteResult(_rows, _batches);
     }
@@ -102,6 +115,7 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
         }
 
         _pending.Clear();
+        _lastByIdentity.Clear();
     }
 
     public ValueTask DisposeAsync()
@@ -154,11 +168,30 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
     }
 
     /// <summary>Surfaces the first failure among finished requests and forgets the successes, so
-    /// a long write neither hides an error until commit nor keeps every task alive.</summary>
+    /// a long write neither hides an error until commit nor keeps every task alive. Walks
+    /// backwards and removes each completed task the moment it is captured, rather than filtering
+    /// then re-testing IsCompleted in a separate RemoveAll pass -- a send that completes in that
+    /// gap would otherwise be dropped from _pending without ever being awaited, hiding a fault.</summary>
     private async Task DrainCompletedAsync()
     {
-        var finished = _pending.Where(t => t.IsCompleted).ToList();
-        _pending.RemoveAll(t => t.IsCompleted);
+        var finished = new List<Task>();
+        for (var i = _pending.Count - 1; i >= 0; i--)
+        {
+            if (_pending[i].IsCompleted)
+            {
+                finished.Add(_pending[i]);
+                _pending.RemoveAt(i);
+            }
+        }
+
+        if (_upsert)
+        {
+            foreach (var key in _lastByIdentity.Where(kv => kv.Value.IsCompleted).Select(kv => kv.Key).ToList())
+            {
+                _lastByIdentity.Remove(key);
+            }
+        }
+
         await Task.WhenAll(finished).ConfigureAwait(false);
     }
 
