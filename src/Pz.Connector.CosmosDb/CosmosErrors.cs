@@ -32,6 +32,10 @@ internal static class CosmosErrors
             case OperationCanceledException:
             case PzConnectorException:
                 return ex;
+            // The SDK validates client-vs-account consistency locally, on the first request, and
+            // reports a raise this way rather than as a service response.
+            case ArgumentException argEx when argEx.Message.Contains("consistency level", StringComparison.OrdinalIgnoreCase):
+                return Fatal("PZCS0101: " + argEx.Message, redactor, ex);
             case CosmosException cosmos:
                 return FromStatus(cosmos.StatusCode, cosmos.SubStatusCode.ToString(CultureInfo.InvariantCulture), FirstLine(cosmos.Message),
                     cosmos.RetryAfter, redactor, context, ex);

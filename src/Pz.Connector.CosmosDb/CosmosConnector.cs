@@ -73,9 +73,24 @@ public sealed class CosmosConnector : IConnector
 
         try
         {
-            using var client = CosmosClientFactory.Create(connection);
+            // The probe client never applies the requested consistency itself: baking a raised level
+            // into the client makes the SDK reject the very first request (including the account
+            // read below) with its own uncoded exception, before this method gets a chance to name
+            // both levels. The comparison below checks the requested level against the account's
+            // actual default directly, which is the same fact a data-plane client would be refused
+            // over -- so CosmosErrors.Wrap's ArgumentException mapping still stands as the backstop
+            // for a client actually opened at that level (source/sink reads).
+            using var client = CosmosClientFactory.Create(connection with { Consistency = null });
             // The account read proves the credential; the database read proves the name.
             var account = await client.ReadAccountAsync().ConfigureAwait(false);
+            if (connection.Consistency is { } requested
+                && ConsistencyRank(requested) > ConsistencyRank(account.Consistency.DefaultConsistencyLevel))
+            {
+                return new ConnectionCheck(false, CosmosErrors.Message(connection.Redactor,
+                    $"PZCS0101: consistency '{ConsistencyName(requested)}' is stronger than the account default "
+                    + $"'{ConsistencyName(account.Consistency.DefaultConsistencyLevel)}'; consistency may only lower the account's default"));
+            }
+
             try
             {
                 await client.GetDatabase(connection.Database).ReadAsync(cancellationToken: ct).ConfigureAwait(false);
@@ -101,4 +116,26 @@ public sealed class CosmosConnector : IConnector
         return CosmosConnectionConfig.Parse(config, errors)
             ?? throw new PzConnectorException("cosmosdb: invalid connection config: " + string.Join("; ", errors), isTransient: false);
     }
+
+    // The SDK enum's declaration order (Strong=0 .. ConsistentPrefix=4) is not a strength order;
+    // this is the actual weakest-to-strongest ranking Cosmos DB documents.
+    private static int ConsistencyRank(ConsistencyLevel level) => level switch
+    {
+        ConsistencyLevel.Eventual => 0,
+        ConsistencyLevel.ConsistentPrefix => 1,
+        ConsistencyLevel.Session => 2,
+        ConsistencyLevel.BoundedStaleness => 3,
+        ConsistencyLevel.Strong => 4,
+        _ => throw new ArgumentOutOfRangeException(nameof(level), level, "unknown consistency level"),
+    };
+
+    private static string ConsistencyName(ConsistencyLevel level) => level switch
+    {
+        ConsistencyLevel.Eventual => "eventual",
+        ConsistencyLevel.ConsistentPrefix => "consistent_prefix",
+        ConsistencyLevel.Session => "session",
+        ConsistencyLevel.BoundedStaleness => "bounded_staleness",
+        ConsistencyLevel.Strong => "strong",
+        _ => level.ToString(),
+    };
 }

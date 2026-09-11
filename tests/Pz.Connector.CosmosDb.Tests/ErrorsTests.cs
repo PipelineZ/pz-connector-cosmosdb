@@ -81,4 +81,15 @@ public sealed class ErrorsTests
         Assert.False(ex.IsTransient);
         Assert.Equal("cosmosdb: ctx: uses ***", ex.Message);
     }
+
+    [Fact]
+    public void A_consistency_raise_is_reported_as_PZCS0101()
+    {
+        var raise = new ArgumentException(
+            "ConsistencyLevel Strong specified in the request is invalid when service is configured with consistency level Session. "
+            + "Ensure the request consistency level is not stronger than the service consistency level.");
+        var ex = (PzConnectorException)CosmosErrors.Wrap(raise, Redactor, "ctx");
+        Assert.False(ex.IsTransient);
+        Assert.StartsWith("cosmosdb: PZCS0101", ex.Message);
+    }
 }

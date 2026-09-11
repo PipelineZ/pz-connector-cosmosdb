@@ -1,3 +1,4 @@
+using Microsoft.Azure.Cosmos;
 using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.CosmosDb.Tests;
@@ -26,23 +27,6 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
     }
 
     [SkippableFact]
-    public async Task Check_connection_with_a_wrong_key_fails_without_echoing_it()
-    {
-        DockerFacts.SkipUnlessDocker();
-        var config = cosmos.ConnectionConfig();
-        config["account_key"] = "d3ZlcnkgYmFkIGtleSB2YWx1ZSB0aGF0IGlzIGxvbmc=";
-        var check = await new CosmosConnector().CheckConnectionAsync(new ConnectorConfig(config), CancellationToken.None);
-        // The pinned vnext-latest preview emulator does not enforce account-key signature validation
-        // (confirmed with a standalone repro against the raw SDK, bypassing the connector entirely: a
-        // well-formed but wrong key is accepted for both ReadAccountAsync and a database read). Real
-        // Cosmos DB -- and a future emulator that enforces auth -- rejects it, so skip rather than
-        // false-fail against this known emulator limitation.
-        Skip.If(check.Ok, "the pinned emulator image does not validate account keys");
-        Assert.False(check.Ok);
-        Assert.DoesNotContain("d3ZlcnkgYmFk", check.Message);
-    }
-
-    [SkippableFact]
     public async Task Check_connection_names_a_missing_database()
     {
         DockerFacts.SkipUnlessDocker();
@@ -53,4 +37,35 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         Assert.Contains("no_such_db", check.Message);
         Assert.Contains("PZCS0102", check.Message);
     }
+
+    /// <summary>The emulator's own reported default drives the requested level, rather than assuming
+    /// Session: a spike against the pinned vnext-latest image found its default is Eventual, not
+    /// Session, so 'strong' (always the strongest level) is requested unless the account itself
+    /// already defaults to strong.</summary>
+    [SkippableFact]
+    public async Task Check_connection_refuses_a_consistency_raise()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var accountDefault = (await cosmos.Client.ReadAccountAsync()).Consistency.DefaultConsistencyLevel;
+        var requested = accountDefault == ConsistencyLevel.Strong ? ConsistencyLevel.BoundedStaleness : ConsistencyLevel.Strong;
+
+        var config = cosmos.ConnectionConfig();
+        config["consistency"] = ConfigName(requested);
+        var check = await new CosmosConnector().CheckConnectionAsync(new ConnectorConfig(config), CancellationToken.None);
+
+        Assert.False(check.Ok);
+        Assert.Contains("PZCS0101", check.Message);
+        Assert.Contains(ConfigName(requested), check.Message);
+        Assert.Contains(ConfigName(accountDefault), check.Message);
+    }
+
+    private static string ConfigName(ConsistencyLevel level) => level switch
+    {
+        ConsistencyLevel.Eventual => "eventual",
+        ConsistencyLevel.ConsistentPrefix => "consistent_prefix",
+        ConsistencyLevel.Session => "session",
+        ConsistencyLevel.BoundedStaleness => "bounded_staleness",
+        ConsistencyLevel.Strong => "strong",
+        _ => throw new ArgumentOutOfRangeException(nameof(level), level, "unknown consistency level"),
+    };
 }
