@@ -1,0 +1,11 @@
+connection:
+  database: e2e
+  auth: account_key
+  endpoint: ${COSMOS_ENDPOINT}
+  account_key: ${COSMOS_KEY}
+  connection_mode: gateway
+read:
+  dataset: orders_in
+write:
+  output: e2e_probe
+  mode: append

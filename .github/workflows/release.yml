@@ -1,0 +1,81 @@
+# NuGet trusted publishing (OIDC) -- no long-lived API key secret is stored in this repo.
+# MANUAL PREREQUISITES (one-time):
+#   1. On nuget.org (https://www.nuget.org/account/trustedpublishing -> Add policy), create a trusted
+#      publishing policy naming this repository's owner/name, this exact workflow filename
+#      ("release.yml", no path), and environment "release". Scope it to the package id
+#      "Pz.Connector.CosmosDb" with the "Push new packages and package versions" scope -- not
+#      "push only new package versions", which cannot create an id that does not exist yet.
+#   2. Create a GitHub Environment named "release" (repo Settings -> Environments) and add an
+#      environment secret NUGET_USER = the nuget.org profile name (NOT email) of the account that
+#      owns the policy.
+# Until that setup exists, a `v*` tag push fails at the NuGet/login step with an authentication
+# error -- expected, not a workflow bug.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # required for NuGet/login's OIDC exchange.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # MinVer computes the release version from this tag + history.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.CosmosDb.slnx -c Release
+      - run: dotnet test Pz.Connector.CosmosDb.slnx -c Release --no-build --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+      # One self-contained single-file publish per RID the package ships; pack collects them all
+      # (the SDK's PzRuntimeIdentifiers default) and writes the manifest by running the linux-x64 binary.
+      # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet cache:
+      # the restore folded into `publish -r` alone does not pull the RID-specific runtime pack this
+      # self-contained build needs (NETSDK1112), even though the same restore run standalone does.
+      - run: |
+          set -euo pipefail
+          for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
+            dotnet restore src/Pz.Connector.CosmosDb -r "$rid"
+            dotnet publish src/Pz.Connector.CosmosDb -c Release -r "$rid" --no-restore
+          done
+          dotnet pack src/Pz.Connector.CosmosDb -c Release -o packages
+      # The manifest is what `pz restore` reads: a wrong runtime, name or capability set, or
+      # a RID whose entrypoint never made it into the pack, is only discovered by whoever installs
+      # the release. Assert it here, while the push has not happened and a version can still be
+      # skipped -- a pushed nuget.org version cannot be replaced.
+      - name: Assert the packed manifest before publishing
+        run: |
+          set -euo pipefail
+          VERSION="$(ls packages/Pz.Connector.CosmosDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.CosmosDb\.(.*)\.nupkg|\1|')"
+          unzip -p "packages/Pz.Connector.CosmosDb.${VERSION}.nupkg" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "cosmosdb"' manifest.json
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge; do
+            grep -q "\"${cap}\"" manifest.json
+          done
+          for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
+            grep -q "\"${rid}\":" manifest.json
+          done
+          # The gallery icon and README ride inside the package; a lost <None Pack="true"> item
+          # would only show up on nuget.org, after a version can no longer be replaced.
+          PKG="packages/Pz.Connector.CosmosDb.${VERSION}.nupkg"
+          unzip -l "${PKG}" | grep -q ' icon.png$'
+          unzip -l "${PKG}" | grep -q ' README.md$'
+          unzip -p "${PKG}" Pz.Connector.CosmosDb.nuspec | grep -q '<icon>icon.png</icon>'
+      - name: NuGet login (trusted publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Push package to nuget.org
+        run: >
+          dotnet nuget push 'packages/*.nupkg'
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --skip-duplicate
