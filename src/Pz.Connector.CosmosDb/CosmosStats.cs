@@ -10,7 +10,10 @@ namespace Pz.Connector.CosmosDb;
 /// The cost is the request charge in request units (<c>ru</c>), which the service meters and bills;
 /// <c>remoteMs</c> is the service's own <c>x-ms-request-duration-ms</c>, whole milliseconds, only
 /// when it sent one. A caller on a continuation thread must pass the handle it captured when the
-/// operation started: <see cref="ConnectorStats.Current"/> is not reliable there.</summary>
+/// operation started: <see cref="ConnectorStats.Current"/> is not reliable there.
+/// The SDK retries a 429 internally (up to the sink's <c>rate_limit_retries</c> budget) and those
+/// attempts never reach this code, so <c>requests</c> and <c>throttled</c> count only what the SDK
+/// surfaced: both are lower bounds on a throttled container.</summary>
 internal static class CosmosStats
 {
     private const string DurationHeader = "x-ms-request-duration-ms";
