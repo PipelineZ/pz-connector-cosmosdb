@@ -120,6 +120,7 @@ internal sealed class CosmosSource(CosmosConnectionConfig connection, CosmosClie
             : context + " (the sample is ordered by _ts, so the dataset's own query must project c._ts, or the dataset must declare fields:)";
         var container = _database.GetContainer(dataset.Container);
         var inference = new SchemaInference(spec.Dataset, redactor);
+        var stats = ConnectorStats.Current;
         try
         {
             using var iterator = container.GetItemQueryStreamIterator(CosmosQueryBuilder.Sample(dataset, dataset.SampleSize), null,
@@ -127,6 +128,7 @@ internal sealed class CosmosSource(CosmosConnectionConfig connection, CosmosClie
             while (iterator.HasMoreResults && inference.Documents < dataset.SampleSize)
             {
                 using var page = await iterator.ReadNextAsync(ct).ConfigureAwait(false);
+                CosmosStats.Report(page, 0, stats);
                 if (page.StatusCode == HttpStatusCode.NotFound)
                 {
                     throw MissingContainer(dataset, spec, null);
@@ -151,6 +153,11 @@ internal sealed class CosmosSource(CosmosConnectionConfig connection, CosmosClie
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (ex is CosmosException cosmos)
+            {
+                CosmosStats.ReportThrottle(cosmos, stats);
+            }
+
             // Classified once, then re-issued against the refusal context when the outcome is
             // fatal; an exception that is already ours (a refusal thrown above) passes through
             // either call unchanged, so it is never decorated twice.

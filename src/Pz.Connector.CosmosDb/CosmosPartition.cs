@@ -22,6 +22,8 @@ internal sealed class CosmosPartition(
         var context = $"dataset '{spec.Dataset}': reading '{dataset.Container}'";
         var builder = new DocumentBatchBuilder(plan, options, spec.Dataset, connection.Redactor);
         var requestOptions = new QueryRequestOptions { MaxItemCount = dataset.PageSize };
+        // Captured here: the iterator may resume on a thread whose ambient context is not this operation's.
+        var stats = ConnectorStats.Current;
         var pages = 0L;
         var rows = 0L;
         foreach (var range in ranges)
@@ -30,7 +32,7 @@ internal sealed class CosmosPartition(
             while (iterator.HasMoreResults)
             {
                 ct.ThrowIfCancellationRequested();
-                using var page = await NextPageAsync(iterator, context, ct).ConfigureAwait(false);
+                using var page = await NextPageAsync(iterator, context, stats, ct).ConfigureAwait(false);
                 pages++;
                 using var document = await ParsePageAsync(page, context, ct).ConfigureAwait(false);
                 if (!document.RootElement.TryGetProperty("Documents", out var documents))
@@ -73,7 +75,7 @@ internal sealed class CosmosPartition(
         }
     }
 
-    private async Task<ResponseMessage> NextPageAsync(FeedIterator iterator, string context, CancellationToken ct)
+    private async Task<ResponseMessage> NextPageAsync(FeedIterator iterator, string context, IConnectorStats stats, CancellationToken ct)
     {
         ResponseMessage page;
         try
@@ -82,9 +84,15 @@ internal sealed class CosmosPartition(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (ex is CosmosException cosmos)
+            {
+                CosmosStats.ReportThrottle(cosmos, stats);
+            }
+
             throw CosmosErrors.Wrap(ex, connection.Redactor, context);
         }
 
+        CosmosStats.Report(page, 0, stats);
         if (!page.IsSuccessStatusCode)
         {
             var failure = CosmosErrors.FromResponse(page, connection.Redactor, context);
