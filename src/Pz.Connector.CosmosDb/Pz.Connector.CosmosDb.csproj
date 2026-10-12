@@ -11,8 +11,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.Sdk" Version="0.11.0-preview.4" />
-    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.11.0-preview.4" />
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.11.0" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.11.0" />
     <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.63.0" />
     <!-- The SDK's build targets refuse to compile without a direct Newtonsoft reference >= 10.0.2. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
