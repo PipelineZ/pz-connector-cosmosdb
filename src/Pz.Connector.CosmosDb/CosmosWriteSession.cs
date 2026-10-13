@@ -53,6 +53,9 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
     public async ValueTask WriteBatchAsync(RecordBatch batch, CancellationToken ct)
     {
         ThrowIfFinished();
+        // Captured before any request is issued: the sends complete on SDK threads that do not carry this
+        // operation's ambient context, so they report into this handle instead.
+        var stats = ConnectorStats.Current;
         for (var row = 0; row < batch.Length; row++)
         {
             ct.ThrowIfCancellationRequested();
@@ -68,7 +71,7 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
                 _lastByIdentity.TryGetValue(identity, out previous);
             }
 
-            var send = SendAsync(document, previous, ct);
+            var send = SendAsync(document, previous, stats, ct);
             if (identity is not null)
             {
                 _lastByIdentity[identity] = send;
@@ -169,7 +172,7 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
     /// key -- <see cref="PartitionKey"/> itself is not usable as one.</summary>
     private static string IdentityOf(RowDocument document) => document.PartitionKey + " " + document.Id;
 
-    private async Task SendAsync(RowDocument document, Task? previous, CancellationToken ct)
+    private async Task SendAsync(RowDocument document, Task? previous, IConnectorStats stats, CancellationToken ct)
     {
         try
         {
@@ -188,10 +191,12 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
                 }
             }
 
-            using var body = new MemoryStream(document.Json.ToArray(), writable: false);
+            var json = document.Json.ToArray();
+            using var body = new MemoryStream(json, writable: false);
             using var response = _upsert
                 ? await _container.UpsertItemStreamAsync(body, document.PartitionKey, _requestOptions, ct).ConfigureAwait(false)
                 : await _container.CreateItemStreamAsync(body, document.PartitionKey, _requestOptions, ct).ConfigureAwait(false);
+            CosmosStats.Report(response, json.Length, stats);
             if (!response.IsSuccessStatusCode)
             {
                 var what = _upsert ? "upserting" : "creating";
@@ -200,6 +205,11 @@ internal sealed class CosmosWriteSession : ISinkWriteSession
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not PzConnectorException)
         {
+            if (ex is CosmosException cosmos)
+            {
+                CosmosStats.ReportThrottle(cosmos, stats);
+            }
+
             throw CosmosErrors.Wrap(ex, _redactor, $"output '{_outputName}': writing document '{document.Id}' in '{_output.Container}'");
         }
         finally

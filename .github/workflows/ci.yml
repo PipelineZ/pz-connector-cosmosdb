@@ -61,7 +61,7 @@ jobs:
           unzip -p "${PKG}" pz.connector.json | tee manifest.json
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "cosmosdb"' manifest.json
-          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge; do
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReportsStats; do
             grep -q "\"${cap}\"" manifest.json
           done
           ! grep -q '"ReplaceWrites"' manifest.json
@@ -95,13 +95,14 @@ jobs:
           COSMOS_KEY: C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==
         run: |
           set -euo pipefail
-          dotnet tool install --global pz --version 0.6.1
+          dotnet tool install --global pz --version 0.11.0
           cd tests/e2e
           sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
           pz restore --feeds "${GITHUB_WORKSPACE}/packages"
           PKG_DIR=".pz/packages/Pz.Connector.CosmosDb/${PKG_VERSION}"
           test -f "${PKG_DIR}/native/Pz.Connector.CosmosDb"
           pz run
+          jq -e '[.nodes[] | select(.connector=="cosmosdb")] | (length == 2) and (map(.remote.requests > 0) | all)' "$(ls -td .pz/runs/*/ | head -n 1)run_results.json"
           count() { docker exec cosmos cosmoshell.sh -c "query \"SELECT VALUE COUNT(1) FROM c\" --database=e2e --container=orders_out" | tr -dc '0-9'; }
           # cosmoshell's `query` wraps results as {"type":"item","values":[...]} and pretty-prints
           # them (matching the emulator's own pretty-printed gateway responses, which the connector's

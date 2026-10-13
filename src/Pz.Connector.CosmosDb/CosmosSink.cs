@@ -35,18 +35,27 @@ internal sealed class CosmosSink(CosmosConnectionConfig connection, Func<CosmosO
         _clients.Add(client);
         var container = client.GetDatabase(connection.Database).GetContainer(output.Container);
         IReadOnlyList<string> partitionKeyPaths;
+        var stats = ConnectorStats.Current;
         try
         {
-            partitionKeyPaths = (await container.ReadContainerAsync(cancellationToken: ct).ConfigureAwait(false)).Resource.PartitionKeyPaths;
+            var properties = await container.ReadContainerAsync(cancellationToken: ct).ConfigureAwait(false);
+            CosmosStats.ReportCharge(properties.RequestCharge, stats);
+            partitionKeyPaths = properties.Resource.PartitionKeyPaths;
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
+            CosmosStats.ReportThrottle(ex, stats);
             throw CosmosErrors.Fatal(
                 $"output '{spec.Output}': container '{output.Container}' does not exist in database '{connection.Database}' (PZCS0302); create it with its partition key, or fix 'container:'",
                 connection.Redactor, ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (ex is CosmosException cosmos)
+            {
+                CosmosStats.ReportThrottle(cosmos, stats);
+            }
+
             throw CosmosErrors.Wrap(ex, connection.Redactor, $"output '{spec.Output}': reading container '{output.Container}'");
         }
 
