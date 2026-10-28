@@ -17,7 +17,12 @@ connectors:
 ```
 
 `pz restore` installs the self-contained binary for your platform (linux-x64, linux-arm64,
-osx-arm64, win-x64) and `pz run` spawns it. Needs **pz 0.6.1 or newer**. Built on
+osx-arm64, win-x64) and `pz run` spawns it. Needs **pz 0.6.1 or newer**, and **pz 0.14.0 or newer**
+for `auth: credential_chain` or `managed_identity` wherever the identity lives in environment
+variables (Container Apps, App Service, AKS workload identity, a service principal set through
+`AZURE_CLIENT_SECRET`): pz starts the connector with a cleared environment and, from 0.14.0, forwards
+the Azure identity variables this package declares (`pz restore` shows `receives host identity:
+azure`). An Azure VM's metadata endpoint needs no variable and works with any pz. Built on
 `Microsoft.Azure.Cosmos` 3.63.0.
 
 The package ships **self-contained** (a full CoreCLR runtime per RID), not Native AOT: the SDK

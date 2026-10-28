@@ -8,11 +8,15 @@
          so this connector ships as a self-contained CoreCLR binary. -->
     <PzPackaging>self-contained</PzPackaging>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- auth: credential_chain and managed_identity resolve through Azure.Identity in this process.
+         pz 0.14+ forwards the Azure identity variables (Container Apps, App Service, AKS workload
+         identity, a service principal in the environment) only to a package that declares them. -->
+    <PzAmbientIdentity>azure</PzAmbientIdentity>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.Sdk" Version="0.11.0" />
-    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.11.0" />
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.14.0" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.14.0" />
     <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.63.0" />
     <!-- The SDK's build targets refuse to compile without a direct Newtonsoft reference >= 10.0.2. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
