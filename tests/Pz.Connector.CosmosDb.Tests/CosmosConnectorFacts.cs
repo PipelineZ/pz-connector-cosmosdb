@@ -53,6 +53,9 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         config["consistency"] = ConfigName(requested);
         var check = await new CosmosConnector().CheckConnectionAsync(new ConnectorConfig(config), CancellationToken.None);
 
+        // A real account refuses a request stronger than its default; the emulator's vnext image accepts one, so
+        // there is nothing to observe against it.
+        Skip.If(check.Ok, "the emulator accepts a consistency raise; only a real account refuses one");
         Assert.False(check.Ok);
         Assert.Contains("PZCS0101", check.Message);
         Assert.Contains(ConfigName(requested), check.Message);
@@ -335,6 +338,30 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
         var ex = await Assert.ThrowsAsync<PzConnectorException>(() => WriteAsync(cosmos, spec, batch.Schema, batch));
         Assert.Contains("PZCS0301", ex.Message);
         Assert.False(await cosmos.ExistsAsync("never_created"));
+    }
+
+    [SkippableFact]
+    public async Task Nested_documents_round_trip_through_a_typed_contract()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var source = await cosmos.SeedAsync(["""{"id":"n1","rec":{"n":5,"tags":["a","b"]},"m":{"k":2},"xs":[1,2,3]}"""]);
+        var (_, batches) = await ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", source, new Dictionary<string, object?>
+        {
+            ["fields"] = new Dictionary<string, object?>
+            {
+                ["id"] = "string", ["rec"] = "struct(n int, tags varchar[])", ["m"] = "map(varchar, bigint)", ["xs"] = "bigint[]",
+            },
+        }));
+        Assert.IsType<Apache.Arrow.Types.StructType>(batches[0].Column(1).Data.DataType);
+        var target = CosmosFixture.NewName("nestedtrip");
+        await cosmos.CreateContainerAsync(target);
+        var spec = new OutputSpec("cosmosdb", target, "append", "fail_on_change", new Dictionary<string, object?>());
+        await WriteAsync(cosmos, spec, batches[0].Schema, batches.ToArray());
+        var doc = Assert.Single(await cosmos.AllAsync(target));
+        Assert.Equal(5, doc.GetProperty("rec").GetProperty("n").GetInt32());
+        Assert.Equal(2, doc.GetProperty("rec").GetProperty("tags").GetArrayLength());
+        Assert.Equal(2, doc.GetProperty("m").GetProperty("k").GetInt32());
+        Assert.Equal(3, doc.GetProperty("xs").GetArrayLength());
     }
 
     [SkippableFact]

@@ -99,6 +99,8 @@ database.
           placed_at: timestamp
           address.city: string
           items: json
+          tags: varchar[]                     # nested types are opt-in through the declaration
+          sku: struct(code varchar, qty int)
         sample_size: 1000                     # optional; documents inspected for inference (1..100000)
         page_size: 1000                       # optional; items per query page (1..10000)
         partitions: auto                      # optional; auto (one per feed range) | an integer 1..N
@@ -107,6 +109,13 @@ database.
 **Declared schema.** `fields:` maps a JSON path (dotted for nested objects) to a type: `string`,
 `int32`, `int64`, `double`, `decimal`, `bool`, `timestamp`, `date`, `json`. The columns are exactly
 those, in that order.
+
+**Nested types.** A `fields:` type may also be a nested contract type: `varchar[]`, `int[3]`,
+`struct(name varchar, tags varchar[])`, `map(varchar, bigint)`, nesting freely (leaves are `int`,
+`bigint`, `double`, `decimal`, `varchar`, `boolean`, `date`, `timestamp`). The document's object or array
+at that path is read into the typed list, struct or map; a subtree of the wrong shape fails the read
+naming the field and `id`. Inference is unchanged: arrays and dynamic-key objects still land as `json`
+text unless you declare them. A nested column cannot be a watermark cursor.
 
 **Inferred schema.** Without `fields:`, the first `sample_size` documents of `query` are inspected,
 sampled in an order stable across the two callers that need to agree (the schema probe and the
@@ -236,9 +245,15 @@ Type spelling on write:
 
 A column the source read as `json` arrives at the sink as pz `string` — its raw JSON **text** — and
 is written back as a JSON **string**, not re-parsed into an array or object: `[1,2]` round-trips as
-`"[1,2]"`. The sink never re-interprets a value's text, and pz has no nested column type to carry
-one; a document that must land with a real array or object needs that shape built from columns
-(dotted names nest) rather than carried through as `json`.
+`"[1,2]"`. The sink never re-interprets a value's text; to land a real array or object, carry it as a
+nested column (below) or build the shape from columns (dotted names nest).
+
+**Nested columns.** The sink declares `NestedTypes`: a struct becomes a JSON object, a list or
+fixed-size list a JSON array, and a map an object keyed by its keys' text (a null or repeated key
+fails the row). Leaves are spelled exactly as flat columns are, including the ±2^53 refusal
+(`PZCS0305`) and decimals as strings. A nested column cannot be the `id`, an `id_from` entry, a merge
+key or a partition key: those must be flat values, and the schema is refused at `BeginWriteAsync`
+naming the column. A leaf type outside the matrix (for example float32) is refused the same way.
 
 A serialised document over 2 MB is refused as `PZCS0306` naming `id`, before it is sent.
 

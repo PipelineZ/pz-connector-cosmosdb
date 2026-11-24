@@ -28,6 +28,17 @@ internal sealed record CosmosOutputConfig(string Container, IReadOnlyList<string
 
     private static readonly ArrowTypeId[] IdTypes = [ArrowTypeId.String, ArrowTypeId.Int32, ArrowTypeId.Int64];
 
+    /// <summary>The first leaf type, at any nesting depth, a JSON document cannot carry; null when
+    /// every leaf can be spelled.</summary>
+    private static IArrowType? FirstUnsupported(IArrowType type) => type switch
+    {
+        ListType l => FirstUnsupported(l.ValueDataType),
+        FixedSizeListType l => FirstUnsupported(l.ValueDataType),
+        MapType m => FirstUnsupported(m.KeyField.DataType) ?? FirstUnsupported(m.ValueField.DataType),
+        StructType st => st.Fields.Select(f => FirstUnsupported(f.DataType)).FirstOrDefault(t => t is not null),
+        _ => DocumentTypes.Contains(type.TypeId) ? null : type,
+    };
+
     public static CosmosOutputConfig? Parse(OutputSpec spec, List<string> errors)
     {
         var start = errors.Count;
@@ -84,9 +95,9 @@ internal sealed record CosmosOutputConfig(string Container, IReadOnlyList<string
 
         foreach (var field in schema.FieldsList)
         {
-            if (!DocumentTypes.Contains(field.DataType.TypeId))
+            if (FirstUnsupported(field.DataType) is { } unsupported)
             {
-                errors.Add($"{prefix}: column '{field.Name}' is {field.DataType.TypeId}, which a JSON document cannot carry; allowed: {string.Join(", ", DocumentTypes)}. Drop it from the pipeline's projection or cast it");
+                errors.Add($"{prefix}: column '{field.Name}' is {unsupported.TypeId}, which a JSON document cannot carry; allowed: {string.Join(", ", DocumentTypes)}. Drop it from the pipeline's projection or cast it");
             }
 
             if (field.Name.Length == 0 || field.Name.Split('.').Any(s => s.Length == 0))
@@ -119,6 +130,11 @@ internal sealed record CosmosOutputConfig(string Container, IReadOnlyList<string
             }
         }
 
+        if (columns.TryGetValue("_ts", out var ts) && ts.DataType is NestedType)
+        {
+            errors.Add($"{prefix}: the '_ts' column is {ts.DataType.TypeId}, but _ts is the service's own timestamp and is dropped from writes");
+        }
+
         ColumnPlan.ValidateNames(schema.FieldsList.Select(f => f.Name).ToList(), prefix, errors);
 
         // Nested columns of one parent must be adjacent: the writer streams objects in column
@@ -148,11 +164,24 @@ internal sealed record CosmosOutputConfig(string Container, IReadOnlyList<string
             lastParents = parents;
         }
 
+        foreach (var key in spec.Keys)
+        {
+            if (columns.TryGetValue(key, out var keyField) && keyField.DataType is NestedType)
+            {
+                errors.Add($"{prefix}: merge key column '{key}' is {keyField.DataType.TypeId}; a key must be a flat value (varchar, int32 or int64), never a struct, list or map");
+            }
+        }
+
         var pkColumns = new List<string>();
         foreach (var path in partitionKeyPaths)
         {
             var column = path.TrimStart('/').Replace('/', '.');
             pkColumns.Add(column);
+            if (columns.TryGetValue(column, out var pk) && pk.DataType is NestedType)
+            {
+                errors.Add($"{prefix}: partition key column '{column}' is {pk.DataType.TypeId}; a partition key must be a scalar, so cast or extract one value in the pipeline");
+            }
+
             if (!columns.ContainsKey(column))
             {
                 errors.Add($"{prefix}: the container's partition key path '{path}' needs a column named '{column}' in the pipeline's output (PZCS0303); columns present: {string.Join(", ", columns.Keys)}");

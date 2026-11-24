@@ -70,4 +70,28 @@ public sealed class DatasetConfigTests
         Assert.Contains(errors, e => e.Contains("field 'x' has unknown type 'blob'", StringComparison.Ordinal));
         Assert.Contains(errors, e => e.Contains("'fields' has an empty field path", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void Fields_accept_nested_contract_types()
+    {
+        var config = Parse(new()
+        {
+            ["fields"] = new Dictionary<string, object?>
+            {
+                ["tags"] = "varchar[]", ["rec"] = "struct(n int, tags varchar[])", ["m"] = "map(varchar, bigint)", ["n"] = "bigint",
+            },
+        }, out var errors);
+        Assert.Empty(errors);
+        Assert.Equal([ColumnKind.Nested, ColumnKind.Nested, ColumnKind.Nested, ColumnKind.Int64], config!.Fields!.Select(f => f.Kind));
+        Assert.IsType<Apache.Arrow.Types.ListType>(config.Fields![0].Type);
+        Assert.IsType<Apache.Arrow.Types.StructType>(config.Fields![1].Type);
+        Assert.IsType<Apache.Arrow.Types.MapType>(config.Fields![2].Type);
+    }
+
+    [Fact]
+    public void A_malformed_nested_type_is_reported()
+    {
+        Assert.Null(Parse(new() { ["fields"] = new Dictionary<string, object?> { ["x"] = "struct(a" } }, out var errors));
+        Assert.Contains(errors, e => e.Contains("field 'x' has unknown type 'struct(a'", StringComparison.Ordinal));
+    }
 }

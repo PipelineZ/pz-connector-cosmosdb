@@ -20,12 +20,13 @@ public sealed class CosmosSinkAcceptance : SinkConnectorAcceptanceTests
     private readonly CosmosFixture _cosmos;
     private readonly string _append = CosmosFixture.NewName("append");
     private readonly string _merge = CosmosFixture.NewName("merge");
+    private readonly string _nested = CosmosFixture.NewName("nested");
 
     public CosmosSinkAcceptance(CosmosFixture cosmos)
     {
         _cosmos = cosmos;
         DockerFacts.SkipUnlessDocker();
-        Task.WhenAll(cosmos.CreateContainerAsync(_append), cosmos.CreateContainerAsync(_merge)).GetAwaiter().GetResult();
+        Task.WhenAll(cosmos.CreateContainerAsync(_append), cosmos.CreateContainerAsync(_merge), cosmos.CreateContainerAsync(_nested)).GetAwaiter().GetResult();
     }
 
     protected override void GateFact() => DockerFacts.SkipUnlessDocker();
@@ -35,6 +36,8 @@ public sealed class CosmosSinkAcceptance : SinkConnectorAcceptanceTests
     protected override ConnectorConfig ValidConfig => new(_cosmos.ConnectionConfig());
 
     protected override OutputSpec SmallOutput => new("cosmosdb", _append, "append", "fail_on_change", new Dictionary<string, object?>());
+
+    protected override OutputSpec? NestedOutput => new("cosmosdb", _nested, "append", "fail_on_change", new Dictionary<string, object?>());
 
     protected override OutputSpec? MergeOutput =>
         new OutputSpec("cosmosdb", _merge, "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id"] };

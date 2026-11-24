@@ -1,4 +1,6 @@
+using Apache.Arrow.Types;
 using Pz.Connectors.Abstractions;
+using Pz.Connectors.Abstractions.Formats;
 
 namespace Pz.Connector.CosmosDb;
 
@@ -92,13 +94,18 @@ internal sealed record CosmosDatasetConfig(
             }
 
             var typeText = typeRaw?.ToString() ?? "";
-            if (!ColumnPlan.TryParseKind(typeText, out var kind))
+            if (ColumnPlan.TryParseKind(typeText, out var kind))
+            {
+                columns.Add(ColumnSpec.Of(name, kind));
+            }
+            else if (ColumnContractType.TryParse(typeText, out var nested, out _) && nested is NestedType)
+            {
+                columns.Add(ColumnSpec.Nested(name, nested!));
+            }
+            else
             {
                 errors.Add($"{prefix}: field '{name}' has unknown type '{typeText}'; known: {ColumnPlan.KindNames}");
-                continue;
             }
-
-            columns.Add(ColumnSpec.Of(name, kind));
         }
 
         if (columns.Count == 0 && errors.Count == start)

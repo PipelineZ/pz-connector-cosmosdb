@@ -150,4 +150,88 @@ public sealed class RowDocumentWriterTests
         Assert.Contains("PZCS0306", ex.Message);
         Assert.Contains("big-one", ex.Message);
     }
+
+    private static RecordBatch NestedBatch()
+    {
+        var tags = new ListArray.Builder(StringType.Default);
+        var tagValues = (StringArray.Builder)tags.ValueBuilder;
+        tags.Append();
+        tagValues.Append("a");
+        tagValues.AppendNull();
+        var recType = new StructType([new Field("n", Int64Type.Default, true), new Field("tags", new ListType(new Field("item", StringType.Default, true)), true)]);
+        var rec = new StructArray(recType, 1, [new Int64Array.Builder().Append(7).Build(), tags.Build()], new ArrowBuffer.BitmapBuilder().Append(true).Build(), 0);
+        var map = new MapArray.Builder(new MapType(StringType.Default, new Decimal128Type(38, 9)));
+        map.Append();
+        ((StringArray.Builder)map.KeyBuilder).Append("k1");
+        ((Decimal128Array.Builder)map.ValueBuilder).Append(1.5m);
+        var pair = new FixedSizeListType(new Field("item", Int32Type.Default, true), 2);
+        var pairArray = new FixedSizeListArray(new ArrayData(pair, 1, 0, 0, [ArrowBuffer.Empty], [new Int32Array.Builder().Append(1).Append(2).Build().Data]));
+        var ts = new TimestampArray.Builder(TimeUnit.Microsecond, "UTC").Append(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero)).Build();
+        var tsList = new ListArray.Builder(new TimestampType(TimeUnit.Microsecond, "UTC"));
+        tsList.Append();
+        ((TimestampArray.Builder)tsList.ValueBuilder).Append(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero));
+        return Batch(("id", new StringArray.Builder().Append("k1").Build()), ("rec", rec), ("m", map.Build()), ("pair", pairArray), ("when", tsList.Build()));
+    }
+
+    [Fact]
+    public void Nested_columns_are_json_objects_and_arrays_with_flat_leaf_spelling()
+    {
+        using var batch = NestedBatch();
+        var doc = Parse(Write(batch));
+        Assert.Equal("""{"n":7,"tags":["a",null]}""", doc.GetProperty("rec").GetRawText());
+        Assert.Equal("""{"k1":"1.500000000"}""", doc.GetProperty("m").GetRawText());
+        Assert.Equal("[1,2]", doc.GetProperty("pair").GetRawText());
+        Assert.Equal("""["2026-01-02T03:04:05.000000Z"]""", doc.GetProperty("when").GetRawText());
+    }
+
+    [Fact]
+    public void A_nested_int64_beyond_2_pow_53_is_refused()
+    {
+        var list = new ListArray.Builder(Int64Type.Default);
+        list.Append();
+        ((Int64Array.Builder)list.ValueBuilder).Append(9007199254740993);
+        using var batch = Batch(("id", new StringArray.Builder().Append("k1").Build()), ("xs", list.Build()));
+        var ex = Assert.Throws<PzConnectorException>(() => Write(batch));
+        Assert.Contains("PZCS0305", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_nested_column_is_accepted_but_a_nested_partition_key_or_unsupported_leaf_is_not()
+    {
+        var list = new ListType(new Field("item", StringType.Default, true));
+        var schema = new Schema([new Field("id", StringType.Default, true), new Field("xs", list, true)], null);
+        var errors = new List<string>();
+        CosmosOutputConfig.ValidateSchema(new OutputSpec("cosmos", "o", "append", "fail_on_change", new Dictionary<string, object?>()), Output, schema, ["/id"], errors);
+        Assert.Empty(errors);
+
+        errors.Clear();
+        CosmosOutputConfig.ValidateSchema(new OutputSpec("cosmos", "o", "append", "fail_on_change", new Dictionary<string, object?>()), Output, schema, ["/xs"], errors);
+        Assert.Contains(errors, e => e.Contains("partition key column 'xs'", StringComparison.Ordinal));
+
+        var floats = new Schema([new Field("id", StringType.Default, true), new Field("fs", new ListType(new Field("item", FloatType.Default, true)), true)], null);
+        errors.Clear();
+        CosmosOutputConfig.ValidateSchema(new OutputSpec("cosmos", "o", "append", "fail_on_change", new Dictionary<string, object?>()), Output, floats, ["/id"], errors);
+        Assert.Contains(errors, e => e.Contains("column 'fs' is Float", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_connector_declares_nested_types()
+    {
+        Assert.True(new CosmosConnector().Capabilities.HasFlag(ConnectorCapabilities.NestedTypes));
+    }
+
+    [Fact]
+    public void Nested_id_id_from_and_merge_key_columns_are_refused()
+    {
+        var st = new StructType([new Field("a", StringType.Default, true)]);
+        var schema = new Schema([new Field("id", st, true), new Field("k", new ListType(new Field("item", StringType.Default, true)), true)], null);
+        var spec = new OutputSpec("cosmos", "o", "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id", "k"] };
+        var errors = new List<string>();
+        CosmosOutputConfig.ValidateSchema(spec, new CosmosOutputConfig("o", ["k"], 32, 9), schema, ["/id"], errors);
+        Assert.Contains(errors, e => e.Contains("merge key column 'k'", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.Contains("merge key column 'id'", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.Contains("the 'id' column is Struct", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.Contains("partition key column 'id'", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.Contains("id_from entry 'k'", StringComparison.Ordinal));
+    }
 }
