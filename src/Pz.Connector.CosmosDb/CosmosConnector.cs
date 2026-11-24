@@ -25,7 +25,7 @@ public sealed class CosmosConnector : IConnector, ISourceConnector, ISinkConnect
 
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.BoundedWindow | ConnectorCapabilities.InclusiveWatermarkBound
-        | ConnectorCapabilities.Merge | ConnectorCapabilities.ReportsStats;
+        | ConnectorCapabilities.Merge | ConnectorCapabilities.ReportsStats | ConnectorCapabilities.NestedTypes;
 
     public string ConnectionConfigSchema => """
         { "type": "object", "required": ["database", "auth"], "properties": {

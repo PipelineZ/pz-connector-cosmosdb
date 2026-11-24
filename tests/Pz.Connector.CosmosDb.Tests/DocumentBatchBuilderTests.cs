@@ -104,4 +104,50 @@ public sealed class DocumentBatchBuilderTests
         Assert.Equal(6L, ((Int64Array)tail.Column(0)).GetValue(0));
         foreach (var b in taken.Append(tail)) b.Dispose();
     }
+
+    private static object? ConvertNested(string type, string json)
+    {
+        var plan = new ColumnPlan([ColumnSpec.Nested("v", Pz.Connectors.Abstractions.Formats.ColumnContractType.ToArrowType(type, "v")), ColumnSpec.Of("id", ColumnKind.String)]);
+        var builder = new DocumentBatchBuilder(plan, BatchOptions.Default, "ds", CosmosRedactor.None);
+        using var doc = JsonDocument.Parse(json);
+        return builder.Convert(plan.Columns[0], doc.RootElement);
+    }
+
+    [Fact]
+    public void Nested_columns_read_the_subtree_into_typed_values()
+    {
+        Assert.Equal(new List<object?> { "a", null }, ((IEnumerable<object?>)ConvertNested("varchar[]", """{"id":"1","v":["a",null]}""")!).ToList());
+        var rec = (IReadOnlyDictionary<string, object?>)ConvertNested("struct(n int, s varchar)", """{"id":"1","v":{"n":3}}""")!;
+        Assert.Equal(3, rec["n"]);
+        Assert.Null(rec["s"]);
+        Assert.Null(ConvertNested("varchar[]", """{"id":"1","v":null}"""));
+    }
+
+    [Fact]
+    public void Nested_columns_build_a_batch_that_round_trips()
+    {
+        var plan = new ColumnPlan([
+            ColumnSpec.Nested("rec", Pz.Connectors.Abstractions.Formats.ColumnContractType.ToArrowType("struct(n int, tags varchar[])", "rec")),
+            ColumnSpec.Nested("m", Pz.Connectors.Abstractions.Formats.ColumnContractType.ToArrowType("map(varchar, bigint)", "m")),
+            ColumnSpec.Of("id", ColumnKind.String)]);
+        var builder = new DocumentBatchBuilder(plan, BatchOptions.Default, "ds", CosmosRedactor.None);
+        using var doc = JsonDocument.Parse("""{"id":"1","rec":{"n":7,"tags":["x","y"]},"m":{"k":5}}""");
+        builder.Append(doc.RootElement);
+        using var batch = builder.Flush()!;
+        Assert.Equal("""{"n":7,"tags":["x","y"]}""", Pz.Connectors.Abstractions.Batches.ArrowCell.ToJson(batch.Column(0), 0));
+        Assert.Equal("""{"k":5}""", Pz.Connectors.Abstractions.Batches.ArrowCell.ToJson(batch.Column(1), 0));
+    }
+
+    [Fact]
+    public void A_subtree_of_the_wrong_shape_refuses_naming_field_and_document()
+    {
+        var ex = Assert.Throws<PzConnectorException>(() => ConvertNested("varchar[]", """{"id":"d9","v":{"a":1}}"""));
+        Assert.Contains("field 'v' of document d9", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Inference_still_lands_arrays_and_objects_under_dynamic_keys_as_json()
+    {
+        Assert.Equal("[1,2]", Convert(ColumnKind.Json, """{"id":"1","v":[1,2]}"""));
+    }
 }

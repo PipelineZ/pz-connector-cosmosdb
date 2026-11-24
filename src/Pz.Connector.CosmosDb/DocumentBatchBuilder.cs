@@ -3,6 +3,7 @@ using System.Text.Json;
 using Apache.Arrow;
 using Pz.Connectors.Abstractions;
 using Pz.Connectors.Abstractions.Batches;
+using Pz.Connectors.Abstractions.Formats;
 
 namespace Pz.Connector.CosmosDb;
 
@@ -59,6 +60,7 @@ internal sealed class DocumentBatchBuilder
         return column.Kind switch
         {
             ColumnKind.Json => value.GetRawText(),
+            ColumnKind.Nested => ToNested(column, value, document),
             ColumnKind.String => value.ValueKind == JsonValueKind.String ? value.GetString() : throw Refuse(column, document, $"holds {Describe(value)} where a string is planned"),
             ColumnKind.Int32 => ToInt32(column, value, document),
             ColumnKind.Int64 => ToInt64(column, value, document),
@@ -92,6 +94,21 @@ internal sealed class DocumentBatchBuilder
 
         value = current;
         return true;
+    }
+
+    /// <summary>The object or array subtree as the typed value the column declares. A subtree of the
+    /// wrong shape, or a leaf the declared type cannot hold, refuses naming the field and document --
+    /// never the value, which may be data.</summary>
+    private object? ToNested(ColumnSpec column, JsonElement value, JsonElement document)
+    {
+        try
+        {
+            return ColumnContractType.ValueFromJson(value, column.Type!);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or ArgumentException)
+        {
+            throw Refuse(column, document, $"holds {value.ValueKind.ToString().ToLowerInvariant()} that does not fit the declared type ({ex.Message}); fix the declared type under fields: or declare the field as json");
+        }
     }
 
     private int ToInt32(ColumnSpec column, JsonElement value, JsonElement document)

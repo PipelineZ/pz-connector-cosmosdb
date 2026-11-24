@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Globalization;
 using System.Text.Json;
 using Apache.Arrow;
+using Apache.Arrow.Types;
 using Microsoft.Azure.Cosmos;
 using Pz.Connectors.Abstractions;
 
@@ -17,7 +18,8 @@ internal sealed record RowDocument(string Id, PartitionKey PartitionKey, ReadOnl
 /// silently rounded and a Decimal128 keeps every digit as a string; a timestamp is fixed-width UTC
 /// ISO-8601 with microseconds; a date is <c>yyyy-MM-dd</c>. The id comes from the <c>id</c> column,
 /// else from <c>id_from</c>, else from the generator; the partition key from the container's own
-/// paths. <c>_ts</c> is dropped: the service owns it.</summary>
+/// paths. A nested column (struct, list, fixed-size list, map) is a JSON object or array whose leaves
+/// are spelled exactly as the flat columns are; a map is an object keyed by its keys' text. <c>_ts</c> is dropped: the service owns it.</summary>
 internal sealed class RowDocumentWriter
 {
     public const int MaxDocumentBytes = 2 * 1024 * 1024;
@@ -244,6 +246,65 @@ internal sealed class RowDocumentWriter
             case BooleanArray a:
                 writer.WriteBooleanValue(a.GetValue(row)!.Value);
                 break;
+            case StructArray a:
+            {
+                var fields = ((StructType)a.Data.DataType).Fields;
+                writer.WriteStartObject();
+                for (var k = 0; k < fields.Count; k++)
+                {
+                    writer.WritePropertyName(fields[k].Name);
+                    WriteValue(writer, a.Fields[k], row, path, rowNumber, id);
+                }
+
+                writer.WriteEndObject();
+                break;
+            }
+
+            case MapArray a:
+            {
+                // A map is an object keyed by the keys' text; JSON forbids a repeated key.
+                var entries = a.KeyValues;
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                writer.WriteStartObject();
+                for (var i = a.ValueOffsets[row]; i < a.ValueOffsets[row + 1]; i++)
+                {
+                    var key = Text(entries.Fields[0], i)
+                        ?? throw CosmosErrors.Fatal($"output '{_output}': column '{string.Join(".", path)}' of document '{id}' (row {rowNumber}) has a map entry with a null key", _redactor);
+                    if (!seen.Add(key))
+                    {
+                        throw CosmosErrors.Fatal($"output '{_output}': column '{string.Join(".", path)}' of document '{id}' (row {rowNumber}) has the map key '{key}' twice, which a JSON object cannot hold", _redactor);
+                    }
+
+                    writer.WritePropertyName(key);
+                    WriteValue(writer, entries.Fields[1], i, path, rowNumber, id);
+                }
+
+                writer.WriteEndObject();
+                break;
+            }
+
+            case ListArray a:
+                writer.WriteStartArray();
+                for (var i = a.ValueOffsets[row]; i < a.ValueOffsets[row + 1]; i++)
+                {
+                    WriteValue(writer, a.Values, i, path, rowNumber, id);
+                }
+
+                writer.WriteEndArray();
+                break;
+            case FixedSizeListArray a:
+            {
+                var size = ((FixedSizeListType)a.Data.DataType).ListSize;
+                writer.WriteStartArray();
+                for (var i = (a.Offset + row) * size; i < (a.Offset + row + 1) * size; i++)
+                {
+                    WriteValue(writer, a.Values, i, path, rowNumber, id);
+                }
+
+                writer.WriteEndArray();
+                break;
+            }
+
             default:
                 // Decimal, Date32, Timestamp, String: their text spelling is the contract.
                 writer.WriteStringValue(Text(column, row));

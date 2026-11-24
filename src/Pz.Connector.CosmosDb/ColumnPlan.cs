@@ -4,13 +4,17 @@ using Apache.Arrow.Types;
 namespace Pz.Connector.CosmosDb;
 
 /// <summary>How a column's value is read out of a document and spelled in Arrow. <see cref="Json"/>
-/// takes any JSON value as its raw text.</summary>
-internal enum ColumnKind { String, Int32, Int64, Double, Decimal, Boolean, Timestamp, Date, Json }
+/// takes any JSON value as its raw text; <see cref="Nested"/> reads an object or array subtree into the
+/// typed list, struct or map the column's <see cref="ColumnSpec.Type"/> declares.</summary>
+internal enum ColumnKind { String, Int32, Int64, Double, Decimal, Boolean, Timestamp, Date, Json, Nested }
 
 /// <summary>One column: its name (the dotted JSON path), the path inside the document, and its kind.</summary>
-internal sealed record ColumnSpec(string Name, string[] Path, ColumnKind Kind)
+/// <see cref="Type"/> is set for a <see cref="ColumnKind.Nested"/> column only.</summary>
+internal sealed record ColumnSpec(string Name, string[] Path, ColumnKind Kind, IArrowType? Type = null)
 {
     public static ColumnSpec Of(string path, ColumnKind kind) => new(path, path.Split('.'), kind);
+
+    public static ColumnSpec Nested(string path, IArrowType type) => new(path, path.Split('.'), ColumnKind.Nested, type);
 }
 
 /// <summary>The dataset's Arrow schema and, per column, how to fill it. <c>id</c> is the one
@@ -24,7 +28,7 @@ internal sealed class ColumnPlan
     /// belongs under <c>fields:</c> as <c>json</c>.</summary>
     public const int MaxColumns = 2000;
 
-    public const string KindNames = "string, int32, int64, double, decimal, bool, timestamp, date, json";
+    public const string KindNames = "string, int32, int64, double, decimal, bool, timestamp, date, json, or nested: varchar[], int[3], struct(name varchar, tags varchar[]), map(varchar, bigint)";
 
     /// <summary>Service-owned properties never inferred and never projected by default. <c>_ts</c>
     /// is deliberately absent: it is the natural "changed since" cursor.</summary>
@@ -33,7 +37,7 @@ internal sealed class ColumnPlan
     public ColumnPlan(IReadOnlyList<ColumnSpec> columns)
     {
         Columns = columns;
-        Schema = new Schema(columns.Select(c => new Field(c.Name, ArrowType(c.Kind), c.Name != "id")).ToList(), null);
+        Schema = new Schema(columns.Select(c => new Field(c.Name, c.Type ?? ArrowType(c.Kind), c.Name != "id")).ToList(), null);
     }
 
     public IReadOnlyList<ColumnSpec> Columns { get; }

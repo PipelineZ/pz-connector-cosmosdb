@@ -338,6 +338,30 @@ public sealed class CosmosConnectorFacts(CosmosFixture cosmos)
     }
 
     [SkippableFact]
+    public async Task Nested_documents_round_trip_through_a_typed_contract()
+    {
+        DockerFacts.SkipUnlessDocker();
+        var source = await cosmos.SeedAsync(["""{"id":"n1","rec":{"n":5,"tags":["a","b"]},"m":{"k":2},"xs":[1,2,3]}"""]);
+        var (_, batches) = await ReadAllAsync(cosmos, new DatasetSpec("cosmosdb", source, new Dictionary<string, object?>
+        {
+            ["fields"] = new Dictionary<string, object?>
+            {
+                ["id"] = "string", ["rec"] = "struct(n int, tags varchar[])", ["m"] = "map(varchar, bigint)", ["xs"] = "bigint[]",
+            },
+        }));
+        Assert.IsType<Apache.Arrow.Types.StructType>(batches[0].Column(1).Data.DataType);
+        var target = CosmosFixture.NewName("nestedtrip");
+        await cosmos.CreateContainerAsync(target);
+        var spec = new OutputSpec("cosmosdb", target, "append", "fail_on_change", new Dictionary<string, object?>());
+        await WriteAsync(cosmos, spec, batches[0].Schema, batches.ToArray());
+        var doc = Assert.Single(await cosmos.AllAsync(target));
+        Assert.Equal(5, doc.GetProperty("rec").GetProperty("n").GetInt32());
+        Assert.Equal(2, doc.GetProperty("rec").GetProperty("tags").GetArrayLength());
+        Assert.Equal(2, doc.GetProperty("m").GetProperty("k").GetInt32());
+        Assert.Equal(3, doc.GetProperty("xs").GetArrayLength());
+    }
+
+    [SkippableFact]
     public async Task Round_trip_through_source_and_sink_keeps_values()
     {
         DockerFacts.SkipUnlessDocker();
