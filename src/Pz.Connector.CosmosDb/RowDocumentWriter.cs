@@ -272,7 +272,7 @@ internal sealed class RowDocumentWriter
                         ?? throw CosmosErrors.Fatal($"output '{_output}': column '{string.Join(".", path)}' of document '{id}' (row {rowNumber}) has a map entry with a null key", _redactor);
                     if (!seen.Add(key))
                     {
-                        throw CosmosErrors.Fatal($"output '{_output}': column '{string.Join(".", path)}' of document '{id}' (row {rowNumber}) has the map key '{key}' twice, which a JSON object cannot hold", _redactor);
+                        throw CosmosErrors.Fatal($"output '{_output}': column '{string.Join(".", path)}' of document '{id}' (row {rowNumber}) has two map entries whose keys have the same text, which a JSON object cannot hold -- make the keys distinct in the pipeline", _redactor);
                     }
 
                     writer.WritePropertyName(key);

@@ -107,7 +107,7 @@ internal sealed class DocumentBatchBuilder
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or ArgumentException)
         {
-            throw Refuse(column, document, $"holds {value.ValueKind.ToString().ToLowerInvariant()} that does not fit the declared type ({ex.Message}); fix the declared type under fields: or declare the field as json");
+            throw Refuse(column, document, $"holds {value.ValueKind.ToString().ToLowerInvariant()} that does not fit the declared type; fix the declared type under fields: or declare the field as json");
         }
     }
 
